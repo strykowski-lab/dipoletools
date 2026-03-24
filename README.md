@@ -13,12 +13,6 @@ A Python toolkit for measuring and analysing cosmic dipoles in source-count and 
 ## Installation
 
 ```bash
-pip install dipoletools
-```
-
-Or install from source:
-
-```bash
 git clone https://github.com/strykowski-lab/dipoletools.git
 cd dipoletools
 pip install -e ".[dev,examples]"
