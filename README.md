@@ -146,11 +146,7 @@ The `Tension` class computes the following quantities from nested sampling evide
 
 ## Citation
 
-If you use `dipoletools` in your research, please cite the following:
-
-> Land & Strykowski (2026), *in prep.*
-
-and include a footnote to the repository:
+If you use `dipoletools` in your research, please include a footnote to the repository:
 
 > [https://github.com/strykowski-lab/dipoletools](https://github.com/strykowski-lab/dipoletools)
 
@@ -158,17 +154,11 @@ BibTeX:
 
 ```bibtex
 @software{dipoletools,
-  author       = {Land, Kate and Strykowski, Mali},
+  author       = {Land-Strykowski, Mali},
   title        = {dipoletools: A toolkit for measuring and analysing cosmic dipoles},
   url          = {https://github.com/strykowski-lab/dipoletools},
   version      = {0.1.0},
   year         = {2026},
-}
-
-@article{land_strykowski_2026,
-  author  = {Land, Kate and Strykowski, Mali},
-  title   = {(in prep.)},
-  year    = {2026},
 }
 ```
 
