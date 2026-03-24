@@ -19,7 +19,7 @@ pip install dipoletools
 Or install from source:
 
 ```bash
-git clone https://github.com/mali/dipoletools.git
+git clone https://github.com/strykowski-lab/dipoletools.git
 cd dipoletools
 pip install -e ".[dev,examples]"
 ```
