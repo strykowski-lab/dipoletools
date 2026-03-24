@@ -1,0 +1,10 @@
+.venv/
+venv/
+.vscode/
+.claude/
+__pycache__/
+*.egg-info/
+dist/
+build/
+*.pyc
+examples/example_outputs/*
