@@ -7,8 +7,44 @@ import scipy as sp
 import matplotlib.pyplot as plt
 from scipy.special import gammaln
 
-from ._utils import ang2vec, r2d, d2r, convert_thetaphi
+from ._utils import ang2vec, r2d, d2r, convert_lonlat, convert_thetaphi
 from ._defaults import DEFAULT_PRIORS
+
+
+def _resolve_second_dipole(second_dipole, map_coords):
+    """Validate a ``second_dipole`` spec and pre-compute the fixed-direction
+    unit vector in ``map_coords``.
+
+    Returns a dict with keys:
+      - ``dir_vec`` : (3,) np.ndarray unit vector in map_coords, or None if
+        the direction is a free parameter.
+      - ``fix_v``   : float amplitude (in units of D_survey), or None if
+        v_sd is a free parameter.
+    Or None if second_dipole is falsy.
+    """
+    if not second_dipole:
+        return None
+    fix_direction = second_dipole.get('fix_direction')
+    direction_coords = second_dipole.get('direction_coords', map_coords)
+    fix_v = second_dipole.get('fix_v')
+
+    dir_vec = None
+    if fix_direction is not None:
+        lon_deg, lat_deg = fix_direction
+        # Convert from the user-specified coord system to the map's coord
+        # system so the dot product with data_positions is consistent.
+        lon_arr = np.atleast_1d(float(lon_deg))
+        lat_arr = np.atleast_1d(float(lat_deg))
+        new_lon, new_lat = convert_lonlat(lon_arr, lat_arr,
+                                          direction_coords, map_coords)
+        theta = d2r(90.0 - new_lat[0])
+        phi = d2r(new_lon[0]) % (2 * np.pi)
+        dir_vec = ang2vec(theta, phi)
+
+    return {
+        'dir_vec': dir_vec,
+        'fix_v': None if fix_v is None else float(fix_v),
+    }
 
 
 class Analyser:
@@ -164,7 +200,7 @@ class Analyser:
     # model
     # ------------------------------------------------------------------
     def model(self, type='poisson', ell=None, bias=False, bias_cecl=9.15e-4,
-              likelihood=None, param_names=None):
+              likelihood=None, param_names=None, second_dipole=None):
         """Configure the model for nested sampling.
 
         Parameters
@@ -182,6 +218,19 @@ class Analyser:
             Ecliptic bias coefficient. Only used when bias=True.
             Default 9.15e-4 (S22 CatWISE sample). Use 7.4e-4 for the
             S21 CatWISE sample.
+        second_dipole : dict, optional
+            Add a second dipole component to the model. Supports three
+            modes: fix direction only (new free v_sd), fix amplitude only
+            (new free theta_sd, phi_sd), or fix both (constant offset).
+            Keys:
+              - ``fix_direction`` : (lon_deg, lat_deg) tuple or None (free).
+              - ``direction_coords`` : 'C'/'G'/'E'. Coord system of
+                ``fix_direction`` or of the prior. Default = map_coords.
+                When the direction is fixed, the vector is converted into
+                the map's coord system internally.
+              - ``fix_v`` : float or None (free). If a float, the secondary
+                dipole amplitude is fixed at ``fix_v * D``.
+            Ignored for custom likelihoods.
         likelihood : callable, optional
             Custom likelihood function. Overrides type/ell.
             Signature: loglike(params, data_counts, data_positions, D).
@@ -207,13 +256,16 @@ class Analyser:
                     f"Unknown model type '{type}'. "
                     "Choose 'poisson', 'general_poisson', or 'gaussian'."
                 )
-            param_names = self._params_from_ell(ell, type=type, bias=bias)
+            sd_resolved = _resolve_second_dipole(second_dipole, self._map_coords)
+            param_names = self._params_from_ell(ell, type=type, bias=bias,
+                                                second_dipole=sd_resolved)
             self._model_config = {
                 'type': type,
                 'ell': ell,
                 'bias': bias,
                 'likelihood': None,
                 'param_names': param_names,
+                'second_dipole': sd_resolved,
             }
 
         # Store bias data
@@ -294,8 +346,12 @@ class Analyser:
             return self._model_summary(self._model2_config)
 
     @staticmethod
-    def _params_from_ell(ell, type='poisson', bias=False):
-        """Generate parameter names from ell modes, model type, and bias flag."""
+    def _params_from_ell(ell, type='poisson', bias=False, second_dipole=None):
+        """Generate parameter names from ell modes, model type, and bias flag.
+
+        If ``second_dipole`` is provided (a dict from _resolve_second_dipole),
+        appends v_sd (if v is free), theta_sd/phi_sd (if direction is free).
+        """
         params = []
         if 1 in ell:
             params.extend(['v', 'theta', 'phi'])
@@ -307,6 +363,11 @@ class Analyser:
             if l_mode > 2:
                 for m in range(-l_mode, l_mode + 1):
                     params.append(f'a_{l_mode}_{m}')
+        if second_dipole is not None:
+            if second_dipole['fix_v'] is None:
+                params.append('v_sd')
+            if second_dipole['dir_vec'] is None:
+                params.extend(['theta_sd', 'phi_sd'])
         if bias:
             params.append('bias')
         if type == 'general_poisson':
@@ -448,7 +509,8 @@ class Analyser:
     # ultranest
     # ------------------------------------------------------------------
     def ultranest(self, savedir=None, name=None, min_num_live_points=400,
-                  dlogz=0.5, frac_remain=0.01, **sampler_kwargs):
+                  dlogz=0.5, frac_remain=0.01, step=False, step_nsteps=None,
+                  **sampler_kwargs):
         """Run nested sampling with UltraNest.
 
         Parameters
@@ -463,6 +525,14 @@ class Analyser:
             Target evidence accuracy. Default 0.5.
         frac_remain : float
             Fraction of remaining evidence. Default 0.01.
+        step : bool
+            If True, attach a ``ultranest.stepsampler.SliceSampler`` to the
+            ReactiveNestedSampler. Strongly recommended for models with
+            more than ~5 parameters (e.g. dipole + quadrupole) where the
+            default rejection sampler struggles to shrink volumes.
+        step_nsteps : int, optional
+            Number of slice steps per new live point. If None, defaults to
+            ``2 * len(param_names)``.
         **sampler_kwargs
             Additional kwargs passed to ReactiveNestedSampler.run().
         """
@@ -497,6 +567,14 @@ class Analyser:
         sampler = ultranest.ReactiveNestedSampler(
             param_names, loglike, ptform, log_dir=log_dir
         )
+
+        if step:
+            import ultranest.stepsampler as _ss
+            nsteps = step_nsteps if step_nsteps is not None else 2 * len(param_names)
+            sampler.stepsampler = _ss.SliceSampler(
+                nsteps=nsteps,
+                generate_direction=_ss.generate_mixture_random_direction,
+            )
 
         run_kwargs = {
             'min_num_live_points': min_num_live_points,
@@ -557,7 +635,8 @@ class Analyser:
         else:
             loglike = self._make_loglike(
                 config['type'], config['ell'], data_counts, data_positions,
-                D_survey, param_names, ecl_lat, cecl
+                D_survey, param_names, ecl_lat, cecl,
+                second_dipole=config.get('second_dipole'),
             )
 
         ptform = self._make_ptform(param_names, priors)
@@ -691,11 +770,12 @@ class Analyser:
     # Likelihood factories
     # ------------------------------------------------------------------
     def _make_loglike(self, type, ell, data_counts, data_positions, D_survey,
-                      param_names, ecl_lat=None, cecl=None):
+                      param_names, ecl_lat=None, cecl=None, second_dipole=None):
         """Create a log-likelihood function for single analysis."""
         def loglike(x):
             params = {p: x[i] for i, p in enumerate(param_names)}
-            expected = self._compute_expected(params, data_positions, D_survey, ell)
+            expected = self._compute_expected(params, data_positions, D_survey, ell,
+                                              second_dipole=second_dipole)
             if ecl_lat is not None:
                 bias = params.get('bias', 0.0)
                 expected = expected * (1 - bias * cecl * np.abs(ecl_lat))
@@ -745,7 +825,7 @@ class Analyser:
     # Expected counts and log-likelihood evaluation
     # ------------------------------------------------------------------
     @staticmethod
-    def _compute_expected(params, data_positions, D_survey, ell):
+    def _compute_expected(params, data_positions, D_survey, ell, second_dipole=None):
         """Compute expected counts from model parameters."""
         N = params.get('N', 1.0)
         expected = np.full(len(data_positions), N, dtype=float)
@@ -779,6 +859,20 @@ class Analyser:
                 expected = N * (1 + D * cos_angle + Q * quad_term)
             else:
                 expected = N * (1 + Q * quad_term)
+
+        # Second-dipole contribution (fixed and/or free components).
+        if second_dipole is not None:
+            if second_dipole['dir_vec'] is not None:
+                sd_vec = second_dipole['dir_vec']
+            else:
+                sd_vec = ang2vec(params['theta_sd'], params['phi_sd'])
+            if second_dipole['fix_v'] is not None:
+                v_sd = second_dipole['fix_v']
+            else:
+                v_sd = params['v_sd']
+            D_sd = v_sd * D_survey
+            cos_angle_sd = np.sum(sd_vec * data_positions, axis=1)
+            expected = expected + N * D_sd * cos_angle_sd
 
         # Higher ell modes using spherical harmonics
         for l_mode in sorted(ell):
