@@ -90,7 +90,7 @@ SHORTHAND_CATALOGUES = {
         'cuts': [{'col': 'integrated_flux', 'min': 15, 'max': 1000}],
     },
     'racs-low1': {
-        'file': 'RACS-low1_sources_25arcsec.csv',
+        'file': 'RACS-low1_sources_25arcsec_allsources.csv',
         'labels': {'ra': 'ra', 'dec': 'dec', 'flux': 'total_flux_source', 'id': 'source_id'},
         'cuts': [{'col': 'total_flux_source', 'min': 15, 'max': 1000}],
     },
@@ -166,6 +166,10 @@ DEFAULT_PRIORS = {
     'phi_b': {'type': 'uniform', 'low': 0.0, 'high': 2 * np.pi},
     'bias': {'type': 'uniform', 'low': -2.0, 'high': 2.0},
     'gp_dispersion': {'type': 'uniform', 'low': 0.0, 'high': 1.0},
+    # Secondary ("second") dipole parameters for two-dipole models.
+    'v_sd': {'type': 'uniform', 'low': 0.0, 'high': 20.0},
+    'theta_sd': {'type': 'polar'},
+    'phi_sd': {'type': 'uniform', 'low': 0.0, 'high': 2 * np.pi},
 }
 
 # ---------------------------------------------------------------------------
@@ -175,6 +179,7 @@ DEFAULT_PRIORS = {
 
 PLOT_LABELS_BASE = {
     'v': r'\tilde{v}',
+    'v_sd': r'\tilde{v}_{\rm sd}',
     'N': r'\bar{N}',
     'Q': r'Q',
     'bias': r'b_{\rm ecl}',
@@ -194,16 +199,19 @@ PLOT_LABELS_ANGULAR = {
         'theta': r'\delta', 'phi': r'\alpha',
         'theta_a': r'\delta_a', 'phi_a': r'\alpha_a',
         'theta_b': r'\delta_b', 'phi_b': r'\alpha_b',
+        'theta_sd': r'\delta_{\rm sd}', 'phi_sd': r'\alpha_{\rm sd}',
     },
     'G': {
         'theta': r'b', 'phi': r'l',
         'theta_a': r'b_a', 'phi_a': r'l_a',
         'theta_b': r'b_b', 'phi_b': r'l_b',
+        'theta_sd': r'b_{\rm sd}', 'phi_sd': r'l_{\rm sd}',
     },
     'E': {
         'theta': r'\beta', 'phi': r'\lambda',
         'theta_a': r'\beta_a', 'phi_a': r'\lambda_a',
         'theta_b': r'\beta_b', 'phi_b': r'\lambda_b',
+        'theta_sd': r'\beta_{\rm sd}', 'phi_sd': r'\lambda_{\rm sd}',
     },
 }
 
