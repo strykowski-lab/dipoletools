@@ -522,8 +522,9 @@ class Analyser:
                     Nb = np.sum(boosted > F)
                     amps[j] = (Nb * delta**2 - Ni) / Ni
                 ax.plot(Fs_full, amps, alpha=0.5)
-            tick_step = (Fs_full[-1] - Fs_full[0]) / 10
-            for x in np.arange(Fs_full[0], Fs_full[-1] + 1e-9, tick_step):
+            x_lo = np.ceil(Fs_full[0])
+            x_hi = np.floor(Fs_full[-1])
+            for x in np.arange(x_lo, x_hi + 0.5, 1.0):
                 ax.axvline(x, ls='--', color='grey', alpha=0.3, lw=0.8)
             ax.set_xlabel(r'Flux limit $S_0$')
             ax.set_ylabel(r'Expected amplitude $\mathcal{D}_\mathrm{CMB}$')
