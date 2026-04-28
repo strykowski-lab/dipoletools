@@ -5,7 +5,7 @@ import numpy as np
 
 from ._utils import (
     healpy_quantile, quantile_1sigma, quantile_2sigma,
-    convert_thetaphi, r2d, d2r, format_value_error
+    convert_thetaphi, r2d, d2r, format_value_error,
 )
 from ._defaults import get_label, PLOT_LABELS_ANGULAR
 
@@ -242,40 +242,101 @@ class Posterior:
     # ------------------------------------------------------------------
     # corner plot
     # ------------------------------------------------------------------
-    def corner(self, parameters=None, labels=None, **kwargs):
+    def corner(self, parameters=None, labels=None, color='#1f77b4',
+               velocity_scale=369.82, decimals=None, show=True, **kwargs):
         """Plot a GetDist corner plot of the posterior chains.
+
+        Shows filled 1- and 2-sigma contours (no sample points), and
+        titles each 1D marginal with the parameter's median and 1-sigma
+        asymmetric errors.
 
         Parameters
         ----------
         parameters : list of str, optional
-            Parameter names to plot. Default: all.
+            Parameter names to plot, in the chain's internal naming
+            (e.g. 'theta', 'phi', 'v'). Default: all.
         labels : dict, optional
-            Override labels for parameters. E.g. {'v': r'$v_{\\rm km/s}$'}.
+            Override LaTeX labels for parameters. E.g. {'v': r'\\tilde{v}'}.
+        color : str
+            Contour colour. Default matplotlib blue.
+        velocity_scale : float
+            Factor to convert 'v' to km/s for plotting. Default 369.82.
+        decimals : int or list of int, optional
+            Decimal places for title formatting. Auto if None.
+        show : bool
+            Call plt.show() at the end. Default True.
         **kwargs
-            Additional kwargs passed to getdist plotting.
+            Additional kwargs forwarded to ``triangle_plot``.
         """
         from getdist import MCSamples, plots as gdplots
+        import matplotlib.pyplot as plt
 
         names = self._param_names
         samples = self._samples
 
         if parameters is not None:
             indices = [names.index(p) for p in parameters if p in names]
-            plot_names = [names[i] for i in indices]
-            plot_samples = samples[:, indices]
         else:
-            plot_names = names
-            plot_samples = samples
+            indices = list(range(len(names)))
 
+        plot_names = [names[i] for i in indices]
+        plot_samples = samples[:, indices].copy()
+
+        # Transform samples to physical / display units to match table()
+        for j, p in enumerate(plot_names):
+            if p == 'v':
+                plot_samples[:, j] *= velocity_scale
+            elif p in ('theta', 'phi', 'theta_a', 'phi_a',
+                       'theta_b', 'phi_b', 'theta2', 'phi2',
+                       'theta_sd', 'phi_sd'):
+                if p.startswith('theta'):
+                    plot_samples[:, j] = 90 - r2d(plot_samples[:, j])
+                else:
+                    plot_samples[:, j] = r2d(plot_samples[:, j])
+
+        # Display names (e.g. theta -> b in galactic) and LaTeX labels
+        display_names = [self._angular_display_name(p) for p in plot_names]
         plot_labels = [get_label(p, self._coord_system, labels) for p in plot_names]
 
-        mc = MCSamples(samples=plot_samples, names=plot_names, labels=plot_labels)
+        mc = MCSamples(
+            samples=plot_samples,
+            names=display_names,
+            labels=plot_labels,
+            settings={'fine_bins_2D': 256, 'smooth_scale_2D': 0.3,
+                      'smooth_scale_1D': 0.3},
+        )
 
+        # 1- and 2-sigma contours only; no scatter points.
         g = gdplots.get_subplot_plotter()
-        g.triangle_plot(mc, filled=True, **kwargs)
+        g.settings.num_plot_contours = 2
+        g.triangle_plot(
+            mc,
+            params=display_names,
+            filled=True,
+            contour_colors=[color],
+            **kwargs,
+        )
 
-        import matplotlib.pyplot as plt
-        plt.show()
+        # Title each 1D marginal with median ± 1-sigma asymmetric errors.
+        if isinstance(decimals, int):
+            decimals = [decimals] * len(display_names)
+
+        n = len(display_names)
+        for i in range(n):
+            ax = g.subplots[i, i]
+            if ax is None:
+                continue
+            med, err = quantile_1sigma(plot_samples[:, i])
+            dec = decimals[i] if decimals is not None else None
+            value_str = format_value_error(med, err[0], err[1], dec)
+            label = plot_labels[i]
+            # plot_labels are bare LaTeX (no $); value_str is wrapped in $...$.
+            title = f'${label} = {value_str.strip("$")}$'
+            ax.set_title(title, fontsize=g.settings.axes_fontsize + 1,
+                         color=color, pad=8)
+
+        if show:
+            plt.show()
         return g
 
     # ------------------------------------------------------------------
