@@ -41,6 +41,7 @@ class MapMaker:
         self._shorthand_name = None   # shorthand catalogue name if used
         self._default_cuts = None  # deferred cuts from shorthand config
         self._user_cut = False     # True if user called cut() manually
+        self._cuts_log = {}        # name -> list of {col, min, max, strict}
         self._map_loader = None    # callable for pre-computed map shorthands
 
         if catalogue is not None:
@@ -212,6 +213,7 @@ class MapMaker:
             if max is None:
                 max = [None] * len(label)
 
+        log = self._cuts_log.setdefault(cat_name, [])
         for lbl, lo, hi in zip(label, min, max):
             col = cat_labels.get(lbl, lbl)
             df[col] = df[col].astype(np.float64)
@@ -219,6 +221,8 @@ class MapMaker:
                 df = df[df[col] > lo] if strict else df[df[col] >= lo]
             if hi is not None:
                 df = df[df[col] < hi] if strict else df[df[col] <= hi]
+            log.append({'label': lbl, 'col': col, 'min': lo, 'max': hi,
+                        'strict': strict})
 
         self._catalogues[cat_name] = df
 
