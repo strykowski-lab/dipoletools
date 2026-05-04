@@ -86,7 +86,7 @@ SHORTHAND_CATALOGUES = {
     },
     'nvss': {
         'file': 'full_NVSS_combined_named.dat',
-        'labels': {'ra': 'ra', 'dec': 'dec', 'flux': 'integrated_flux', 'id': 'source_name'},
+        'labels': {'ra': 'ra', 'dec': 'dec', 'flux': 'integrated_flux', 'id': 'source_name', 'flux_err': 'integrated_flux_unc'},
         'cuts': [{'col': 'integrated_flux', 'min': 15, 'max': 1000}],
     },
     'racs-low1': {

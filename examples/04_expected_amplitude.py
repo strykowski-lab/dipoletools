@@ -29,7 +29,7 @@ os.makedirs('example_outputs', exist_ok=True)
 # The default 'racs-low1' shorthand catalogue (allsources.csv) doesn't
 # carry the per-source flux uncertainty, so we point at the fuller
 # galacticcut catalogue and supply labels explicitly.
-racs_path = '/Users/mali/repos/datastore/RACS-low1_sources_25arcsec_galacticcut.csv'
+racs_path = '/Users/mali/repos/datastore/RACS-low1_sources_25arcsec_galacticcut.fits'
 
 mm = MapMaker((racs_path, {
     'ra': 'ra', 'dec': 'dec',

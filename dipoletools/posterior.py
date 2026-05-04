@@ -342,7 +342,7 @@ class Posterior:
     # ------------------------------------------------------------------
     # sky plot
     # ------------------------------------------------------------------
-    def sky(self, levels=None, smooth=0.04, color='cornflowerblue', **kwargs):
+    def sky(self, levels=None, smooth=0.04, color='cornflowerblue', quad_color=None, **kwargs):
         """Plot posterior contours on a healpy Mollweide projection.
 
         Automatically detects angular parameters and converts to
@@ -403,17 +403,18 @@ class Posterior:
             hp.projview(np.zeros(hp.nside2npix(1)), cmap='Greys', min=0, max=1,
                         graticule=True, graticule_labels=False, cbar=False)
 
+            theta_name = self._param_names[theta_idx]
+            is_quad = theta_name in ('theta_a', 'theta_b')
+            plot_color = (quad_color if (is_quad and quad_color is not None) else color)
+
             try:
                 from dynesty import plotting as dyplot
                 dyplot._hist2d(l_plot, b_rad, levels=levels, smooth=smooth,
-                               color=color, no_fill_contours=True,
+                               color=plot_color, no_fill_contours=True,
                                contour_kwargs={'zorder': 1, 'linewidths': 2},
                                contourf_kwargs={'zorder': 1})
             except (ImportError, TypeError):
                 pass
-
-            # Add label for which angular pair this is
-            theta_name = self._param_names[theta_idx]
             if theta_name != 'theta':
                 plt.title(f"Angular pair: {theta_name}, {self._param_names[phi_idx]}")
 
