@@ -7,7 +7,8 @@ import scipy as sp
 import matplotlib.pyplot as plt
 from scipy.special import gammaln
 
-from ._utils import ang2vec, r2d, d2r, convert_lonlat, convert_thetaphi
+from ._utils import (ang2vec, r2d, d2r, convert_lonlat, convert_thetaphi,
+                      lonlat_names)
 from ._defaults import DEFAULT_PRIORS
 
 
@@ -89,6 +90,7 @@ class Analyser:
         # Accept MapMaker / MaskMaker objects directly
         from .mapmaker import MapMaker
         from .maskmaker import MaskMaker
+        self._mapmaker = map if isinstance(map, MapMaker) else None
         if isinstance(map, MapMaker):
             map = np.asarray(map.map)
         if isinstance(mask, MaskMaker):
@@ -385,6 +387,219 @@ class Analyser:
         return summary
 
     # ------------------------------------------------------------------
+    # expected_amplitude
+    # ------------------------------------------------------------------
+    def expected_amplitude(self, alpha=0.75, alpha_std=0.5, n_mc=100,
+                           fluxcut=None, cutoff=None,
+                           flux_label=None, flux_err_label=None,
+                           catalogue=None, return_std=False, plot=True,
+                           seed=None):
+        """Estimate the expected kinematic dipole amplitude from the catalogue.
+
+        Two-stage flow: with ``cutoff=None`` (default) runs 5 quick MC
+        passes and shows an inspection plot of amplitude vs flux limit so
+        the user can pick a sensible lower cutoff. Re-call with a
+        numerical ``cutoff`` (mJy offset above the flux cut) to run the
+        full MC and get a value.
+
+        Sources surviving any cuts/crossmatch on the MapMaker catalogue
+        and falling in unmasked HEALPix pixels of the Analyser map are
+        used.
+
+        Parameters
+        ----------
+        alpha, alpha_std : float
+            Mean and stddev of the per-source spectral-index distribution.
+        n_mc : int
+            Number of MC iterations in full mode.
+        fluxcut : float, optional
+            Flux threshold (same units as catalogue flux). Defaults to
+            the most recent ``min`` cut on the flux column.
+        cutoff : float, optional
+            Lower bound (above ``fluxcut``) where the linear fit starts.
+            If None, runs the inspection-plot pass.
+        flux_label, flux_err_label : str, optional
+            Override the label keys ('flux', 'flux_err') used to look up
+            the column names in the MapMaker labels dict.
+        catalogue : str, optional
+            Name of the MapMaker catalogue. Defaults to the first one.
+        return_std : bool
+            If True (and cutoff is set), return ``(mean, std)``.
+        plot : bool
+            If True (default) and cutoff is set, show a single-trial
+            amp-vs-flux plot with the linear fit and the recovered
+            intercept.
+        seed : int, optional
+            RNG seed for reproducibility.
+        """
+        import scipy.constants as _sc
+        if self._mapmaker is None:
+            raise ValueError(
+                "expected_amplitude requires the Analyser to be built from "
+                "a MapMaker (so the catalogue is accessible)."
+            )
+
+        mm = self._mapmaker
+        cat_name = catalogue if catalogue is not None else mm._catalogue_order[0]
+        if cat_name not in mm._catalogues:
+            raise ValueError(f"No catalogue named '{cat_name}'.")
+
+        cat = mm._catalogues[cat_name]
+        labels = mm._labels[cat_name]
+
+        flbl = flux_label if flux_label is not None else 'flux'
+        elbl = flux_err_label if flux_err_label is not None else 'flux_err'
+        flux_col = labels.get(flbl, flbl)
+        flux_err_col = labels.get(elbl, elbl)
+        if flux_col not in cat.columns:
+            raise ValueError(f"Flux column '{flux_col}' not in catalogue.")
+        if flux_err_col not in cat.columns:
+            raise ValueError(
+                f"Flux-error column '{flux_err_col}' not in catalogue."
+            )
+
+        # Resolve fluxcut from the MapMaker cuts log if not supplied.
+        if fluxcut is None:
+            log = mm._cuts_log.get(cat_name, [])
+            for entry in reversed(log):
+                if entry['col'] == flux_col and entry['min'] is not None:
+                    fluxcut = float(entry['min'])
+                    break
+            if fluxcut is None:
+                raise ValueError(
+                    "Could not infer fluxcut: no min cut on the flux column "
+                    "is recorded on the MapMaker. Pass fluxcut= explicitly."
+                )
+
+        # Restrict to sources falling in unmasked pixels of self._map.
+        if self._map is None:
+            raise ValueError("No map loaded on the Analyser.")
+        nside = hp.npix2nside(len(self._map))
+        cat_lon, cat_lat = self._catalogue_lonlat(cat, labels, mm)
+        # Convert catalogue coords to map coords if needed.
+        cat_sys = mm._coord_system
+        map_sys = self._map_coords
+        if cat_sys != map_sys:
+            cat_lon, cat_lat = convert_lonlat(cat_lon, cat_lat,
+                                              cat_sys, map_sys)
+        pix = hp.ang2pix(nside, cat_lon, cat_lat, lonlat=True)
+        mask = self._mask
+        if mask is not None:
+            keep = mask[pix]
+        else:
+            keep = np.ones(len(cat), dtype=bool)
+
+        flux_arr = np.asarray(cat[flux_col], dtype=float)[keep]
+        ferr_arr = np.asarray(cat[flux_err_col], dtype=float)[keep]
+        if len(flux_arr) == 0:
+            raise ValueError("No catalogue sources survived the mask.")
+
+        v_cmb = 369.83e3
+        beta = v_cmb / _sc.c
+        delta = (1 + beta) / np.sqrt(1 - beta**2)
+
+        rng = np.random.default_rng(seed)
+
+        def _one_pass():
+            jitter = rng.normal(flux_arr, ferr_arr)
+            sp_idx = rng.normal(alpha, alpha_std, size=len(jitter))
+            boosted = jitter * delta**(1 + sp_idx)
+            Fs_full = np.linspace(fluxcut, fluxcut + 21, 100)
+            return jitter, boosted, Fs_full
+
+        if cutoff is None:
+            # Inspection mode: 5 quick passes, plot only.
+            import matplotlib.pyplot as plt
+            fig, ax = plt.subplots()
+            for _ in range(5):
+                jitter, boosted, Fs_full = _one_pass()
+                amps = np.empty(len(Fs_full))
+                for j, F in enumerate(Fs_full):
+                    Ni = np.sum(jitter > F)
+                    if Ni == 0:
+                        amps[j] = np.nan
+                        continue
+                    Nb = np.sum(boosted > F)
+                    amps[j] = (Nb * delta**2 - Ni) / Ni
+                ax.plot(Fs_full, amps, alpha=0.5)
+            x_lo = np.ceil(Fs_full[0])
+            x_hi = np.floor(Fs_full[-1])
+            for x in np.arange(x_lo, x_hi + 0.5, 1.0):
+                ax.axvline(x, ls='--', color='grey', alpha=0.3, lw=0.8)
+            ax.set_xlabel(r'Flux limit $S_0$')
+            ax.set_ylabel(r'Expected amplitude $\mathcal{D}_\mathrm{CMB}$')
+            ax.set_title('What should the lower cutoff flux be?')
+            plt.show()
+            return None
+
+        # Full mode.
+        amplitudes = np.empty(n_mc)
+        # Stash one trial for plotting.
+        trial_idx = int(rng.integers(0, n_mc))
+        trial_Fs = trial_amps = trial_slope = trial_intercept = None
+        for i in range(n_mc):
+            jitter, boosted, Fs_full = _one_pass()
+            Fs = Fs_full[Fs_full > fluxcut + cutoff]
+            amps = np.empty(len(Fs))
+            for j, F in enumerate(Fs):
+                Ni = np.sum(jitter > F)
+                Nb = np.sum(boosted > F)
+                amps[j] = (Nb * delta**2 - Ni) / Ni
+            slope, intercept = np.polyfit(Fs, amps, 1)
+            amplitudes[i] = slope * fluxcut + intercept
+            if i == trial_idx:
+                # Compute amp curve over the full flux range for plotting.
+                amps_full = np.empty(len(Fs_full))
+                for j, F in enumerate(Fs_full):
+                    Ni = np.sum(jitter > F)
+                    if Ni == 0:
+                        amps_full[j] = np.nan
+                        continue
+                    Nb = np.sum(boosted > F)
+                    amps_full[j] = (Nb * delta**2 - Ni) / Ni
+                trial_Fs = Fs_full
+                trial_amps = amps_full
+                trial_slope = slope
+                trial_intercept = intercept
+
+        mean_amp = float(np.mean(amplitudes))
+        std_amp = float(np.std(amplitudes))
+
+        if plot:
+            import matplotlib.pyplot as plt
+            fig, ax = plt.subplots()
+            ax.plot(trial_Fs, trial_amps, color='C0', alpha=0.7)
+            xs = np.array([fluxcut, trial_Fs[-1]])
+            ax.plot(xs, trial_slope * xs + trial_intercept,
+                    color='black', ls='--')
+            ax.axvline(fluxcut, ls='--', color='grey', alpha=0.5)
+            ax.set_xlabel(r'Flux limit $S_0$')
+            ax.set_ylabel(r'Expected amplitude $\mathcal{D}_\mathrm{CMB}$')
+            plt.show()
+
+        if self._D is None:
+            self._D = mean_amp
+        if return_std:
+            return mean_amp, std_amp
+        return mean_amp
+
+    @staticmethod
+    def _catalogue_lonlat(cat, labels, mm):
+        """Return (lon, lat) in degrees for the catalogue, in mm._coord_system."""
+        lon_name, lat_name = lonlat_names(mm._coord_system)
+        lon_col = labels.get(lon_name, lon_name)
+        lat_col = labels.get(lat_name, lat_name)
+        if lon_col not in cat.columns:
+            for try_lon, try_lat in [('ra', 'dec'), ('l', 'b')]:
+                t_lon = labels.get(try_lon, try_lon)
+                t_lat = labels.get(try_lat, try_lat)
+                if t_lon in cat.columns and t_lat in cat.columns:
+                    lon_col, lat_col = t_lon, t_lat
+                    break
+        return (np.asarray(cat[lon_col], dtype=float),
+                np.asarray(cat[lat_col], dtype=float))
+
+    # ------------------------------------------------------------------
     # priors
     # ------------------------------------------------------------------
     def priors(self, shared_parameters=None, **kwargs):
@@ -541,7 +756,14 @@ class Analyser:
         if self._map is None:
             raise ValueError("No map loaded.")
         if self._D is None:
-            raise ValueError("D (dipole amplitude) must be set before sampling.")
+            import warnings
+            import scipy.constants as _sc
+            self._D = 369.83e3 / _sc.c
+            warnings.warn(
+                "D not specified; falling back to v_CMB/c = "
+                f"{self._D:.4e}. Pass D= or call "
+                "Analyser.expected_amplitude() for a catalogue-derived value."
+            )
         if self._model_config is None:
             self.model()
 
