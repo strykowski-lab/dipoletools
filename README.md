@@ -6,11 +6,13 @@ A Python toolkit for measuring and analysing cosmic dipoles in source-count and 
 
 - Loading radio/infrared/CMB catalogues and binning them into HEALPix maps
 - Creating and combining sky masks (galactic plane cuts, point-source excision, coordinate-based slicing)
-- Fitting dipole (and higher multipole) models to pixelised count maps via nested sampling ([UltraNest](https://johannesbuchner.github.io/UltraNest/))
+- Fitting dipole (and higher multipole) models to pixelised count maps via nested sampling — choice of [UltraNest](https://johannesbuchner.github.io/UltraNest/) (CPU) or [BlackJAX](https://blackjax-devs.github.io/blackjax/) (GPU-accelerated, via JAX)
 - Analysing posterior chains: corner plots, sky projections, formatted LaTeX tables
 - Computing Bayesian tension statistics (log-Bayes ratio, suspiciousness, calibrated sigma) between datasets
 
 ## Installation
+
+Default install (UltraNest only — CPU nested sampling):
 
 ```bash
 git clone https://github.com/strykowski-lab/dipoletools.git
@@ -18,11 +20,22 @@ cd dipoletools
 pip install -e ".[dev,examples]"
 ```
 
+Add the `blackjax` extra for GPU-accelerated nested sampling via JAX/BlackJAX:
+
+```bash
+pip install -e ".[dev,examples,blackjax]"
+```
+
+For Apple Silicon (Metal) or NVIDIA CUDA GPUs you also need a device-specific
+JAX build. See [`docs/gpu.md`](docs/gpu.md) for setup details and notes on the
+float32 fallback used on `jax-metal`.
+
 ### Requirements
 
 - Python >= 3.10
 - numpy, scipy, healpy, astropy, pandas, matplotlib
 - ultranest, h5py, getdist, anesthetic
+- `[blackjax]` extra: jax, blackjax (handley-lab `nested_sampling` branch)
 
 ## Quick start
 
@@ -57,6 +70,16 @@ from dipoletools import Analyser
 a = Analyser(map=count_map, mask=mask, D=0.0046, map_coords='G')
 a.model(type='poisson', ell=[0, 1])
 a.ultranest(savedir='results/my_run', min_num_live_points=400)
+```
+
+For GPU-accelerated nested sampling on the same model, use `.blackjax(...)`
+instead. It supports `gaussian`, `poisson`, and `general_poisson` (with the
+ecliptic-bias correction); for joint analyses it forces `v, theta, phi`
+shared. Use `.ultranest(...)` for ell≥2, second-dipole models, or custom
+shared/unshared layouts.
+
+```python
+a.blackjax(savedir='results/my_run', n_live=500, n_delete=50, seed=0)
 ```
 
 ### 4. Analyse the posterior
