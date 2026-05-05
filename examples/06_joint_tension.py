@@ -76,11 +76,13 @@ a_B.ultranest(savedir=savedir, name='dataset_B', min_num_live_points=200, dlogz=
 # 3. Run joint analysis (shared v, theta, phi)
 # -------------------------------------------------------------------------
 print("\n--- Running Joint A+B ---")
-a_joint = Analyser(Map=counts_A, D=D_survey, Map2=counts_B, D2=D_survey, map_coords='G')
-a_joint.model(type='poisson')
-a_joint.model2(type='poisson', shared_parameters=['v', 'theta', 'phi'])
-a_joint.ultranest(savedir=savedir, name='dataset_A+dataset_B',
-                  min_num_live_points=200, dlogz=1.0)
+a_A_joint = Analyser(map=counts_A, D=D_survey, map_coords='G')
+a_A_joint.model(type='poisson')
+a_B_joint = Analyser(map=counts_B, D=D_survey, map_coords='G')
+a_B_joint.model(type='poisson')
+a_A_joint.add(a_B_joint)
+a_A_joint.ultranest(savedir=savedir, name='dataset_A+dataset_B',
+                    min_num_live_points=200, dlogz=1.0)
 
 # -------------------------------------------------------------------------
 # 4. Compute tension statistics
@@ -169,3 +171,11 @@ print(f"B:     {p_B.table()}")
 print(f"A+B:   {t.table()}")
 
 print("\nDone!")
+
+# -------------------------------------------------------------------------
+# Legacy API reference (kept for context; not run)
+# -------------------------------------------------------------------------
+# a_joint = Analyser(Map=counts_A, D=D_survey, Map2=counts_B, D2=D_survey, map_coords='G')
+# a_joint.model(type='poisson')
+# a_joint.model2(type='poisson', shared_parameters=['v', 'theta', 'phi'])
+# a_joint.ultranest(savedir=savedir, name='dataset_A+dataset_B', ...)
