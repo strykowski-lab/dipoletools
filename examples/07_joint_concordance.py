@@ -75,11 +75,11 @@ a_B.ultranest(savedir=savedir, name='concordant_B', min_num_live_points=200, dlo
 # 3. Run joint analysis (shared v, theta, phi)
 # -------------------------------------------------------------------------
 print("\n--- Running Joint A+B ---")
-a_joint = Analyser(Map=counts_A, D=D_survey, Map2=counts_B, D2=D_survey, map_coords='G')
-a_joint.model(type='poisson')
-a_joint.model2(type='poisson', shared_parameters=['v', 'theta', 'phi'])
-a_joint.ultranest(savedir=savedir, name='concordant_A+concordant_B',
-                  min_num_live_points=200, dlogz=1.0)
+a_A.add(a_B)
+print('Shared parameters:', a_A._shared_parameters)
+# a_A.priors(shared_parameters=['v']) # example of overriding default shared parameters to just share v
+a_A.ultranest(savedir=savedir, name='concordant_A+concordant_B',
+                    min_num_live_points=200, dlogz=1.0)
 
 # -------------------------------------------------------------------------
 # 4. Compute tension statistics
