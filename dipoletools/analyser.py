@@ -1,6 +1,10 @@
 """Analyser class: model setup, nested sampling, and smoothed map generation."""
 
+import copy
+import inspect
 import os
+import warnings
+
 import numpy as np
 import healpy as hp
 import scipy as sp
@@ -48,6 +52,16 @@ def _resolve_second_dipole(second_dipole, map_coords):
     }
 
 
+def _introspect_name(obj, frame):
+    """Return the first local variable name in *frame* that is *obj*, or None."""
+    if frame is None:
+        return None
+    for var_name, val in frame.f_locals.items():
+        if val is obj and not var_name.startswith('_'):
+            return var_name
+    return None
+
+
 class Analyser:
     """Set up models and run nested sampling on HEALPix count maps.
 
@@ -75,6 +89,12 @@ class Analyser:
                  map_coords='C', map2_coords=None,
                  # Accept old-style kwargs for backwards compat during transition
                  Map=None, Mask=None, Map2=None, Mask2=None, D2=None):
+        # Detect legacy 2-dataset form before aliasing
+        _using_legacy_2dataset = (
+            map2 is not None or mask2 is not None or d2 is not None or
+            Map2 is not None or Mask2 is not None or D2 is not None
+        )
+
         # Support both old and new kwarg names
         if map is None and Map is not None:
             map = Map
@@ -86,6 +106,14 @@ class Analyser:
             mask2 = Mask2
         if d2 is None and D2 is not None:
             d2 = D2
+
+        if _using_legacy_2dataset:
+            warnings.warn(
+                "The Map2/map2 form of Analyser is legacy. Prefer composing "
+                "single-dataset Analysers with a1.add(a2). See README.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
 
         # Accept MapMaker / MaskMaker objects directly
         from .mapmaker import MapMaker
@@ -138,6 +166,11 @@ class Analyser:
         # Sampling results
         self._savedir = None
         self._smooth_map = None
+
+        # Compositional N-way analysis
+        self._children: dict = {}          # ordered dict of child Analysers
+        self._is_composite: bool = False
+        self._shared_params: list = ['v', 'theta', 'phi']  # default shared params
 
     # ------------------------------------------------------------------
     # Properties for map, mask, D, map2, mask2, d2
@@ -705,6 +738,167 @@ class Analyser:
         if not kwargs and shared_parameters is None:
             return self._priors_summary(self._priors2_config)
 
+    # ------------------------------------------------------------------
+    # Compositional N-way API
+    # ------------------------------------------------------------------
+    def add(self, other: "Analyser", name: str | None = None) -> "Analyser":
+        """Add a child Analyser to form a joint composite.
+
+        Parameters
+        ----------
+        other : Analyser
+            Single-dataset Analyser to add.
+        name : str, optional
+            Name for this child. Defaults to the variable name of *other* at
+            the call site (introspected). Falls back to 'analyser_N' with a
+            UserWarning if introspection fails.
+
+        Returns
+        -------
+        self
+        """
+        if other is self:
+            raise ValueError("Cannot add an Analyser to itself.")
+        if self._map2 is not None:
+            raise ValueError(
+                "Cannot use add() on a legacy 2-dataset Analyser (constructed with "
+                "Map2=). Use the compositional form instead."
+            )
+        for existing_name, existing_child in self._children.items():
+            if existing_child is other:
+                raise ValueError(
+                    f"This Analyser is already registered as {existing_name!r}."
+                )
+
+        frame = inspect.currentframe().f_back
+
+        # Handle nested composition: flatten with a warning
+        if other._is_composite:
+            warnings.warn(
+                "The Analyser being added is itself composite. Flattening: "
+                "its children will be added as siblings.",
+                UserWarning,
+                stacklevel=2,
+            )
+            other_name = name or _introspect_name(other, frame) or \
+                f'analyser_{len(self._children) + 1}'
+            if other_name in self._children:
+                raise ValueError(f"Name {other_name!r} is already used.")
+            # Add a shallow copy of other (without its children) as a sibling
+            other_snap = copy.copy(other)
+            other_snap._children = {}
+            other_snap._is_composite = False
+            self._children[other_name] = other_snap
+            self._is_composite = True
+            # Absorb other's children as flat siblings
+            for child_name, child in other._children.items():
+                if child_name in self._children:
+                    raise ValueError(
+                        f"Name collision during flattening: {child_name!r} "
+                        "already exists in self."
+                    )
+                self._children[child_name] = child
+            return self
+
+        # Normal single-dataset add
+        if name is None:
+            name = _introspect_name(other, frame)
+            if name is None:
+                name = f'analyser_{len(self._children) + 1}'
+                warnings.warn(
+                    f"Could not introspect a variable name for the added Analyser. "
+                    f"Registered as {name!r}. Pass name= explicitly to suppress this.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+        if name in self._children:
+            raise ValueError(f"Name {name!r} is already used.")
+
+        if other._map_coords != self._map_coords:
+            raise ValueError(
+                f"Cannot add analyser with map_coords={other._map_coords!r}; "
+                f"self has map_coords={self._map_coords!r}. "
+                "Heterogeneous coordinate systems are not yet supported."
+            )
+
+        self._reconcile_shared_priors(other, name, stacklevel=2)
+        self._children[name] = other
+        self._is_composite = True
+        return self
+
+    def access(self, name: str) -> "Analyser":
+        """Return the child Analyser registered under *name*.
+
+        Mutations on the returned object propagate into the composite.
+
+        Raises
+        ------
+        KeyError
+            If *name* is not found. The error message lists available names.
+        """
+        if name not in self._children:
+            available = list(self._children.keys())
+            raise KeyError(
+                f"No child named {name!r}. Available: {available}"
+            )
+        return self._children[name]
+
+    def remove(self, name: str) -> "Analyser":
+        """Remove a child Analyser by name.
+
+        If this was the last child, the composite reverts to single-dataset mode.
+
+        Raises
+        ------
+        KeyError
+            If *name* is not found.
+        """
+        if name not in self._children:
+            available = list(self._children.keys())
+            raise KeyError(
+                f"No child named {name!r}. Available: {available}"
+            )
+        del self._children[name]
+        if len(self._children) == 0:
+            self._is_composite = False
+        return self
+
+    def shared(self, params: list) -> "Analyser":
+        """Declare which parameters are shared across all children.
+
+        Defaults to ['v', 'theta', 'phi'] if never called.
+        Calling this re-runs prior reconciliation on all existing children.
+
+        Parameters
+        ----------
+        params : list of str
+            Parameter names to share.
+        """
+        self._shared_params = list(params)
+        for cname, child in self._children.items():
+            self._reconcile_shared_priors(child, cname, stacklevel=2)
+        return self
+
+    def _reconcile_shared_priors(self, other: "Analyser", name: str,
+                                  stacklevel: int = 2) -> None:
+        """Warn and overwrite child priors for any shared param that differs from self."""
+        if self._priors_config is None or other._priors_config is None:
+            return
+        for p in self._shared_params:
+            if p not in other._priors_config:
+                continue
+            self_prior = self._priors_config.get(p)
+            other_prior = other._priors_config.get(p)
+            if self_prior is not None and other_prior is not None \
+                    and self_prior != other_prior:
+                warnings.warn(
+                    f"Shared prior {p!r} on {name!r} differs from a1's prior; "
+                    f"defaulting to a1's prior.",
+                    UserWarning,
+                    stacklevel=stacklevel + 1,
+                )
+                other._priors_config[p] = copy.deepcopy(self_prior)
+
     @staticmethod
     def _priors_summary(config):
         """Return a summary string of prior configuration."""
@@ -725,7 +919,7 @@ class Analyser:
     # ------------------------------------------------------------------
     def ultranest(self, savedir=None, name=None, min_num_live_points=400,
                   dlogz=0.5, frac_remain=0.01, step=False, step_nsteps=None,
-                  **sampler_kwargs):
+                  seed=None, **sampler_kwargs):
         """Run nested sampling with UltraNest.
 
         Parameters
@@ -748,10 +942,14 @@ class Analyser:
         step_nsteps : int, optional
             Number of slice steps per new live point. If None, defaults to
             ``2 * len(param_names)``.
+        seed : int, optional
+            Random seed for reproducibility. Sets numpy's global seed before
+            sampler construction.
         **sampler_kwargs
             Additional kwargs passed to ReactiveNestedSampler.run().
         """
         import ultranest
+        import ultranest.stepsampler
 
         if self._map is None:
             raise ValueError("No map loaded.")
@@ -767,11 +965,11 @@ class Analyser:
         if self._model_config is None:
             self.model()
 
-        is_joint = self._map2 is not None
+        is_legacy_joint = self._map2 is not None
 
-        if is_joint and self._D2 is None:
+        if is_legacy_joint and self._D2 is None:
             raise ValueError("d2 must be set for joint analysis.")
-        if is_joint and self._model2_config is None:
+        if is_legacy_joint and self._model2_config is None:
             raise ValueError("model2 must be configured for joint analysis.")
 
         # Set up save directory
@@ -779,8 +977,13 @@ class Analyser:
             self._savedir = savedir
             os.makedirs(savedir, exist_ok=True)
 
+        if seed is not None:
+            np.random.seed(seed)
+
         # Build the likelihood and prior transform
-        if is_joint:
+        if self._is_composite:
+            param_names, loglike, ptform = self._build_joint_n()
+        elif is_legacy_joint:
             param_names, loglike, ptform = self._build_joint()
         else:
             param_names, loglike, ptform = self._build_single()
@@ -959,6 +1162,116 @@ class Analyser:
 
         ptform = self._make_ptform(combined_params, combined_priors)
 
+        return combined_params, loglike, ptform
+
+    def _build_joint_n(self):
+        """Build likelihood and prior for N-way joint analysis (N >= 2 datasets).
+
+        Handles both the compositional N=2 case (uses legacy '2' suffix for
+        byte-for-byte chain compatibility) and the N>=3 case (uses '_name' suffix).
+        """
+        datasets = [self] + list(self._children.values())
+        names = ['a1'] + list(self._children.keys())
+        n_total = len(datasets)
+        use_legacy_n2 = (n_total == 2)
+
+        # Validate: only mono+dipole (ell=[0] or ell=[0,1]) is supported.
+        # TODO: Add quadrupole/higher support in a follow-up PR.
+        for d, dname in zip(datasets, names):
+            if d._model_config is None:
+                raise ValueError(f"Dataset {dname!r} has no model configured.")
+            if d._priors_config is None:
+                raise ValueError(f"Dataset {dname!r} has no priors configured.")
+            if d._map is None:
+                raise ValueError(f"Dataset {dname!r} has no map.")
+            if d._D is None:
+                raise ValueError(f"Dataset {dname!r} has D not set.")
+            ell = d._model_config['ell']
+            if any(l > 1 for l in ell):
+                raise NotImplementedError(
+                    f"N-way joint analysis supports only ell=[0] or ell=[0,1]. "
+                    f"Dataset {dname!r} has ell={ell}. "
+                    "Quadrupole/higher support is planned for a follow-up PR."
+                )
+            if d._map_coords != self._map_coords:
+                raise ValueError(
+                    f"Dataset {dname!r} has map_coords={d._map_coords!r} but "
+                    f"self has map_coords={self._map_coords!r}. "
+                    "Heterogeneous coordinate systems are not yet supported."
+                )
+
+        combined_params = []
+        combined_priors = {}
+        per_dataset_loglikes = []
+
+        for i, (d, dname) in enumerate(zip(datasets, names)):
+            config = d._model_config
+            priors = d._priors_config
+            params_base = list(config['param_names'])
+
+            # Build mapped param names with appropriate suffix
+            params_mapped = []
+            for p in params_base:
+                if p in self._shared_params:
+                    params_mapped.append(p)
+                elif use_legacy_n2 and i == 0:
+                    # Self in N=2: no suffix (matches legacy _build_joint)
+                    params_mapped.append(p)
+                elif use_legacy_n2 and i == 1:
+                    # Single child in N=2: '2' suffix (byte-compat with legacy)
+                    params_mapped.append(p + '2')
+                else:
+                    # N>=3: use _name suffix for all datasets including self
+                    params_mapped.append(f'{p}_{dname}')
+
+            # Accumulate combined parameter list (no duplicates)
+            for pm in params_mapped:
+                if pm not in combined_params:
+                    combined_params.append(pm)
+
+            # Accumulate combined priors
+            for p_base, p_mapped in zip(params_base, params_mapped):
+                if p_mapped not in combined_priors:
+                    if p_base in self._shared_params:
+                        combined_priors[p_mapped] = self._priors_config[p_base]
+                    else:
+                        combined_priors[p_mapped] = priors.get(
+                            p_base,
+                            DEFAULT_PRIORS.get(
+                                p_base,
+                                {'type': 'uniform', 'low': 0.0, 'high': 1.0}
+                            )
+                        )
+
+            # Prepare per-dataset data
+            nside = hp.npix2nside(len(d._map))
+            mask = d._mask
+            data_counts = d._map[mask]
+            pos = np.array(hp.pix2vec(nside, np.arange(len(d._map)))).T
+            data_positions = pos[mask]
+            D_survey = d._D
+
+            ecl_lat = None
+            cecl = None
+            if config.get('bias'):
+                cecl = d._bias_cecl
+                ecl_lat = self._compute_ecliptic_lat(nside, mask, d._map_coords)
+
+            # Reuse _make_loglike_dict_joint (no coord conversion needed: all
+            # children are required to share map_coords, validated above).
+            fn = self._make_loglike_dict_joint(
+                config['type'], config['ell'], data_counts, data_positions,
+                D_survey, params_base, params_mapped,
+                need_convert=False, from_sys=self._map_coords,
+                to_sys=self._map_coords, ecl_lat=ecl_lat, cecl=cecl,
+            )
+            per_dataset_loglikes.append(fn)
+
+        def loglike(x):
+            x_dict = {p: x[i] for i, p in enumerate(combined_params)}
+            return sum(fn(x_dict) for fn in per_dataset_loglikes)
+
+        ptform = self._make_ptform(combined_params, combined_priors)
         return combined_params, loglike, ptform
 
     # ------------------------------------------------------------------
