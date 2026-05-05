@@ -100,7 +100,8 @@ print(t.table())
 All models support:
 - Arbitrary multipole combinations via `ell=[0, 1, 2, ...]`
 - Ecliptic latitude bias correction (`bias=True`)
-- Joint two-dataset analysis with shared parameters
+- Joint N-dataset analysis with shared parameters
+- Adding an additional dipole (with optional fixed parameters)
 - Custom likelihood functions
 
 ## Coordinate systems
@@ -122,10 +123,12 @@ The `examples/` directory contains worked scripts demonstrating the full pipelin
 | `01_mapmaker.py` | Loading catalogues, flux cuts, HEALPix binning |
 | `02_maskmaker.py` | Galactic plane masks, disc masking, coordinate slices |
 | `03_analyser_single.py` | Single-dataset dipole fit with synthetic data |
-| `04_model_types.py` | Comparing Poisson, general Poisson, Gaussian, and bias models |
-| `05_posterior_tension.py` | Loading real chains, posterior analysis, tension computation |
-| `06_joint_tension.py` | Joint analysis of two discrepant datasets (high tension) |
-| `07_joint_concordance.py` | Joint analysis of two concordant datasets (low tension) |
+| `04_expected_amplitude.py` | Compute D_CMB from the source catalogue with a flux cut |
+| `05_model_types.py` | Comparing Poisson, general Poisson, Gaussian, and bias models |
+| `06_posterior_tension.py` | Loading real chains, posterior analysis, tension computation |
+| `07_joint_tension.py` | Joint analysis of two discrepant datasets (high tension) |
+| `08_joint_concordance.py` | Joint analysis of two concordant datasets (low tension) |
+| `09_two_dipoles.py` | Add a second dipole moment to the expected counts |
 
 ## Tension statistics
 

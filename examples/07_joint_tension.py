@@ -1,4 +1,4 @@
-"""Example 6: Joint analysis — Two datasets in TENSION.
+"""Example 7: Joint analysis — Two datasets in TENSION.
 
 Generates two synthetic Poisson dipole maps that point in different
 directions on the sky, runs individual and joint nested sampling,
@@ -76,11 +76,11 @@ a_B.ultranest(savedir=savedir, name='dataset_B', min_num_live_points=200, dlogz=
 # 3. Run joint analysis (shared v, theta, phi)
 # -------------------------------------------------------------------------
 print("\n--- Running Joint A+B ---")
-a_A.add(a_B)
-print('Shared parameters:', a_A._shared_parameters)
-# a_A.priors(shared_parameters=['v']) # example of overriding default shared parameters to just share v
-a_A.ultranest(savedir=savedir, name='dataset_A+dataset_B',
-                    min_num_live_points=200, dlogz=1.0)
+a_joint = Analyser(Map=counts_A, D=D_survey, Map2=counts_B, D2=D_survey, map_coords='G')
+a_joint.model(type='poisson')
+a_joint.model2(type='poisson', shared_parameters=['v', 'theta', 'phi'])
+a_joint.ultranest(savedir=savedir, name='dataset_A+dataset_B',
+                  min_num_live_points=200, dlogz=1.0)
 
 # -------------------------------------------------------------------------
 # 4. Compute tension statistics
@@ -113,27 +113,27 @@ p_AB = Posterior(f'{savedir}/dataset_A+dataset_B', coords='G')
 try:
     p_A.corner()
     plt.suptitle('Dataset A posterior', y=1.02)
-    plt.savefig('example_outputs/06_corner_A.png', dpi=100, bbox_inches='tight')
+    plt.savefig('example_outputs/07_corner_A.png', dpi=100, bbox_inches='tight')
     plt.close()
-    print("\nSaved 06_corner_A.png")
+    print("\nSaved 07_corner_A.png")
 except Exception as e:
     print(f"Corner A skipped: {e}")
 
 try:
     p_B.corner()
     plt.suptitle('Dataset B posterior', y=1.02)
-    plt.savefig('example_outputs/06_corner_B.png', dpi=100, bbox_inches='tight')
+    plt.savefig('example_outputs/07_corner_B.png', dpi=100, bbox_inches='tight')
     plt.close()
-    print("Saved 06_corner_B.png")
+    print("Saved 07_corner_B.png")
 except Exception as e:
     print(f"Corner B skipped: {e}")
 
 try:
     p_AB.corner()
     plt.suptitle('Joint A+B posterior (forced agreement)', y=1.02)
-    plt.savefig('example_outputs/06_corner_joint.png', dpi=100, bbox_inches='tight')
+    plt.savefig('example_outputs/07_corner_joint.png', dpi=100, bbox_inches='tight')
     plt.close()
-    print("Saved 06_corner_joint.png")
+    print("Saved 07_corner_joint.png")
 except Exception as e:
     print(f"Joint corner skipped: {e}")
 
@@ -143,18 +143,18 @@ except Exception as e:
 try:
     p_A.sky(color='cornflowerblue')
     plt.title('Dataset A sky posterior')
-    plt.savefig('example_outputs/06_sky_A.png', dpi=100, bbox_inches='tight')
+    plt.savefig('example_outputs/07_sky_A.png', dpi=100, bbox_inches='tight')
     plt.close()
-    print("Saved 06_sky_A.png")
+    print("Saved 07_sky_A.png")
 except Exception as e:
     print(f"Sky A skipped: {e}")
 
 try:
     p_B.sky(color='orange')
     plt.title('Dataset B sky posterior')
-    plt.savefig('example_outputs/06_sky_B.png', dpi=100, bbox_inches='tight')
+    plt.savefig('example_outputs/07_sky_B.png', dpi=100, bbox_inches='tight')
     plt.close()
-    print("Saved 06_sky_B.png")
+    print("Saved 07_sky_B.png")
 except Exception as e:
     print(f"Sky B skipped: {e}")
 
@@ -169,11 +169,3 @@ print(f"B:     {p_B.table()}")
 print(f"A+B:   {t.table()}")
 
 print("\nDone!")
-
-# -------------------------------------------------------------------------
-# Legacy API reference (kept for context; not run)
-# -------------------------------------------------------------------------
-# a_joint = Analyser(Map=counts_A, D=D_survey, Map2=counts_B, D2=D_survey, map_coords='G')
-# a_joint.model(type='poisson')
-# a_joint.model2(type='poisson', shared_parameters=['v', 'theta', 'phi'])
-# a_joint.ultranest(savedir=savedir, name='dataset_A+dataset_B', ...)

@@ -1,4 +1,4 @@
-"""Example 4: Model types — Comparing poisson, general_poisson, and gaussian.
+"""Example 5: Model types — Comparing poisson, general_poisson, and gaussian.
 
 Demonstrates:
 - Setting up each of the three likelihood types

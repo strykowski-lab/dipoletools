@@ -1,4 +1,4 @@
-"""Example 8: Analyser — Two-dipole model (primary + secondary).
+"""Example 9: Analyser — Two-dipole model (primary + secondary).
 
 The ``second_dipole`` kwarg on ``Analyser.model`` adds a second dipole
 component to the expected counts:

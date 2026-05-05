@@ -1,4 +1,4 @@
-"""Example 5: Posterior and Tension — Loading chains and computing statistics.
+"""Example 6: Posterior and Tension — Loading chains and computing statistics.
 
 Demonstrates:
 - Loading a Posterior from a chain directory
