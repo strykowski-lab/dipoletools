@@ -167,7 +167,7 @@ def test_compose_3_general_poisson():
         )
         return fn(x_dict)
 
-    shared = a1._shared_params
+    shared = a1._shared_parameters
     base = list(a1._model_config['param_names'])
     mapped_a1 = [p if p in shared else f'{p}_a1' for p in base]
     expected_sum = single_ll(a1, base, mapped_a1)
@@ -224,7 +224,7 @@ def test_compose_3_with_gaussian():
 
     # Evaluate just the gaussian component using a1's factory directly
     params_base_gauss = list(a3._model_config['param_names'])
-    params_mapped_gauss = [p if p in a1._shared_params else f'{p}_gauss'
+    params_mapped_gauss = [p if p in a1._shared_parameters else f'{p}_gauss'
                            for p in params_base_gauss]
     fn_gauss = a1._make_loglike_dict_joint(
         'gaussian', [0, 1], counts3, pos3, D3,

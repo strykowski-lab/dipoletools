@@ -170,7 +170,6 @@ class Analyser:
         # Compositional N-way analysis
         self._children: dict = {}          # ordered dict of child Analysers
         self._is_composite: bool = False
-        self._shared_params: list = ['v', 'theta', 'phi']  # default shared params
 
     # ------------------------------------------------------------------
     # Properties for map, mask, D, map2, mask2, d2
@@ -645,11 +644,17 @@ class Analyser:
 
         Parameters
         ----------
-        shared_parameters : list, optional
-            Ignored for priors (used only in priors2).
+        shared_parameters : list of str, optional
+            Parameter names shared across datasets. For the compositional
+            N-way path this replaces calling shared(); for the legacy
+            two-dataset path it is equivalent to the shared_parameters
+            argument of model2(). Re-runs prior reconciliation on any
+            existing children. Defaults to ['v', 'theta', 'phi'] once
+            the first child is added.
         **kwargs : dict
             Prior settings for parameters.
         """
+        shared_params = shared_parameters
         if self._model_config is None:
             self.model()  # use defaults
 
@@ -683,7 +688,13 @@ class Analyser:
             elif isinstance(val, dict):
                 self._priors_config[p] = val
 
-        if not kwargs:
+        # Update shared parameter list (works for both legacy and N-joint)
+        if shared_params is not None:
+            self._shared_parameters = list(shared_params)
+            for cname, child in self._children.items():
+                self._reconcile_shared_priors(child, cname, stacklevel=2)
+
+        if not kwargs and shared_params is None:
             return self._priors_summary(self._priors_config)
 
     def priors2(self, shared_parameters=None, **kwargs):
@@ -821,6 +832,9 @@ class Analyser:
                 "Heterogeneous coordinate systems are not yet supported."
             )
 
+        # Set default shared params on first add
+        if not self._is_composite and not self._shared_parameters:
+            self._shared_parameters = ['v', 'theta', 'phi']
         self._reconcile_shared_priors(other, name, stacklevel=2)
         self._children[name] = other
         self._is_composite = True
@@ -863,28 +877,12 @@ class Analyser:
             self._is_composite = False
         return self
 
-    def shared(self, params: list) -> "Analyser":
-        """Declare which parameters are shared across all children.
-
-        Defaults to ['v', 'theta', 'phi'] if never called.
-        Calling this re-runs prior reconciliation on all existing children.
-
-        Parameters
-        ----------
-        params : list of str
-            Parameter names to share.
-        """
-        self._shared_params = list(params)
-        for cname, child in self._children.items():
-            self._reconcile_shared_priors(child, cname, stacklevel=2)
-        return self
-
     def _reconcile_shared_priors(self, other: "Analyser", name: str,
                                   stacklevel: int = 2) -> None:
         """Warn and overwrite child priors for any shared param that differs from self."""
         if self._priors_config is None or other._priors_config is None:
             return
-        for p in self._shared_params:
+        for p in self._shared_parameters:
             if p not in other._priors_config:
                 continue
             self_prior = self._priors_config.get(p)
@@ -1212,7 +1210,7 @@ class Analyser:
             # Build mapped param names with appropriate suffix
             params_mapped = []
             for p in params_base:
-                if p in self._shared_params:
+                if p in self._shared_parameters:
                     params_mapped.append(p)
                 elif use_legacy_n2 and i == 0:
                     # Self in N=2: no suffix (matches legacy _build_joint)
@@ -1232,7 +1230,7 @@ class Analyser:
             # Accumulate combined priors
             for p_base, p_mapped in zip(params_base, params_mapped):
                 if p_mapped not in combined_priors:
-                    if p_base in self._shared_params:
+                    if p_base in self._shared_parameters:
                         combined_priors[p_mapped] = self._priors_config[p_base]
                     else:
                         combined_priors[p_mapped] = priors.get(
