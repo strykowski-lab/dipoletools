@@ -27,8 +27,7 @@ pip install -e ".[dev,examples,blackjax]"
 ```
 
 For Apple Silicon (Metal) or NVIDIA CUDA GPUs you also need a device-specific
-JAX build. See [`docs/gpu.md`](docs/gpu.md) for setup details and notes on the
-float32 fallback used on `jax-metal`.
+JAX build.
 
 ### Requirements
 
