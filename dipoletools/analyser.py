@@ -948,7 +948,7 @@ class Analyser:
         )
 
     def blackjax(self, savedir=None, name=None, seed=0,
-                 n_live=500, n_delete=50, num_mcmc_steps=None,
+                 n_live=500, n_delete=300, num_mcmc_steps=None,
                  dlogz=0.5, max_iterations=10000):
         """Run GPU-accelerated nested sampling with BlackJAX.
 

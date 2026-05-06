@@ -513,4 +513,13 @@ def run_ultranest(analyser, savedir=None, name=None, min_num_live_points=400,
         else:
             analyser._savedir = savedir
 
+    if analyser._savedir is not None:
+        eq_path = os.path.join(analyser._savedir, 'chains',
+                               'equal_weighted_post.txt')
+        if os.path.exists(eq_path):
+            with open(eq_path, 'r') as f:
+                n_eq = sum(1 for _ in f) - 1  # minus header
+            print(f"[dipoletools.ultranest] Wrote {n_eq} equal-weighted "
+                  f"posterior samples to {eq_path}")
+
     return sampler.results

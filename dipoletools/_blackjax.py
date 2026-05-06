@@ -309,6 +309,41 @@ def _make_jax_loglike_single(analyser):
     return jax.jit(loglike), param_names, lows, highs, is_polar
 
 
+def _legacy_map2_pseudo_child(analyser):
+    """Wrap a legacy ``Map2=`` Analyser's second dataset as a pseudo-child
+    that quacks like a single-dataset Analyser for ``_make_jax_loglike_joint``.
+
+    Translates the ``2``-suffixed entries in ``_priors2_config`` back to base
+    names so the joint builder can look them up by ``p_base``.
+    """
+    from .analyser import Analyser
+    child = Analyser.__new__(Analyser)
+    child._map = analyser._map2
+    child._mask = analyser._mask2
+    child._D = analyser._D2
+    child._map_coords = analyser._map2_coords
+    child._model_config = analyser._model2_config
+    child._bias_cecl = analyser._bias_cecl_2
+    child._children = {}
+    child._is_composite = False
+
+    child_priors = {}
+    cfg2 = analyser._model2_config
+    p2_cfg = analyser._priors2_config or {}
+    if cfg2 is not None:
+        for p_base in cfg2['param_names']:
+            if p_base in (analyser._shared_parameters or []):
+                child_priors[p_base] = (analyser._priors_config or {}).get(p_base)
+                continue
+            p2 = p_base + '2'
+            if p2 in p2_cfg:
+                child_priors[p_base] = p2_cfg[p2]
+            elif p_base in p2_cfg:
+                child_priors[p_base] = p2_cfg[p_base]
+    child._priors_config = child_priors
+    return child
+
+
 def _make_jax_loglike_joint(analyser):
     """Build a JAX log-likelihood for a joint N-dataset Analyser with the
     forced shared layout (v,theta,phi shared; everything else unshared).
@@ -327,13 +362,8 @@ def _make_jax_loglike_joint(analyser):
         datasets = [analyser] + list(analyser._children.values())
         names = ['a1'] + list(analyser._children.keys())
     elif analyser._map2 is not None:
-        # Legacy 2-dataset analyser exposed via .blackjax(...) — treat the
-        # second dataset as a single child for parameter renaming. Use the '2'
-        # suffix to match the legacy chain layout.
-        raise BlackjaxScopeError(
-            "Legacy 2-dataset Analyser (Map2=) is not supported by .blackjax(). "
-            "Compose Analysers with a1.add(a2) instead."
-        )
+        datasets = [analyser, _legacy_map2_pseudo_child(analyser)]
+        names = ['a1', 'a2']
     else:
         raise ValueError("Not a composite Analyser; use _make_jax_loglike_single.")
 
@@ -453,9 +483,10 @@ def _write_outputs_via_anesthetic(savedir, name, param_names, dead_info):
         logL=logL, logL_birth=logL_birth,
     )
 
-    # Equal-weighted samples: anesthetic exposes .compress() or sampling
-    # from importance weights; use posterior_points()
-    eq = ns.posterior_points()
+    # Equal-weighted samples by importance resampling. posterior_points()
+    # returns ~ESS points (often <100), which makes downstream KDE plots
+    # look clumpy; compress with an explicit large count instead.
+    eq = ns.compress(ncompress=8000, weighted=False)
     samples_arr = eq[list(param_names)].to_numpy()
 
     # Header line + samples
@@ -464,6 +495,8 @@ def _write_outputs_via_anesthetic(savedir, name, param_names, dead_info):
         eq_path, samples_arr,
         header=' '.join(param_names), comments='',
     )
+    print(f"[dipoletools.blackjax] Wrote {len(samples_arr)} equal-weighted "
+          f"posterior samples to {eq_path}")
 
     # Statistics: logZ, D_KL, d via .stats(nsamples)
     stats = ns.stats(nsamples=200)
@@ -500,7 +533,7 @@ def _write_outputs_via_anesthetic(savedir, name, param_names, dead_info):
 # Runner
 # ----------------------------------------------------------------------
 def run_blackjax(analyser, savedir=None, name=None, seed=0,
-                 n_live=500, n_delete=50, num_mcmc_steps=None,
+                 n_live=500, n_delete=300, num_mcmc_steps=None,
                  dlogz=0.5, max_iterations=10000):
     """Run nested sampling with BlackJAX. Body of ``Analyser.blackjax(...)``."""
     import jax
@@ -508,6 +541,12 @@ def run_blackjax(analyser, savedir=None, name=None, seed=0,
     import blackjax
     import blackjax.ns.nss as nss
     import blackjax.ns.utils as ns_utils
+
+    # NOTE: To improve resolution (and reduce lumpiness), increase n_live.
+    # For a single data set {N, v, theta, phi} n_live/n_delete = 1500/900
+    # recovers similar posteriors to ultranest. For a bit more speed without
+    # too much lumpiness, n_live/n_delete = 1000/600 seems to be good enough.
+    # Can reduce further for speed. The 10:6 ratio seems to work well.
 
     # Scope checks first (don't import jax-heavy things until we know we run)
     _check_supported(analyser)
@@ -529,7 +568,8 @@ def run_blackjax(analyser, savedir=None, name=None, seed=0,
     _configure_jax()
 
     # Override shared parameters to the forced layout for joint analyses
-    if analyser._is_composite:
+    is_legacy_joint = analyser._map2 is not None
+    if analyser._is_composite or is_legacy_joint:
         analyser._shared_parameters = list(_FORCED_SHARED)
         loglike_fn, param_names, lows, highs, is_polar = _make_jax_loglike_joint(analyser)
     else:
@@ -537,7 +577,11 @@ def run_blackjax(analyser, savedir=None, name=None, seed=0,
 
     n_dim = len(param_names)
     if num_mcmc_steps is None:
-        num_mcmc_steps = max(2 * n_dim, 10)
+        # Each new live point is generated by num_mcmc_steps MCMC steps from a
+        # surviving parent. Too few steps -> children stay correlated with the
+        # parent and the dead-point cloud has few effectively-independent
+        # samples, producing visibly lumpy posteriors after compression.
+        num_mcmc_steps = 4 * n_dim
 
     logprior_fn = _make_jax_logprior(lows, highs, is_polar)
 
@@ -560,12 +604,19 @@ def run_blackjax(analyser, savedir=None, name=None, seed=0,
     # Termination: run until the remaining log-evidence in live points is
     # smaller than dlogz vs. the accumulated log-evidence in dead points.
     # A simple fixed-iteration cap is the safe fallback.
+    import sys, time
     dead = []
     logZ_dead = -jnp.inf
+    n_dead = 0
+    t0 = time.time()
+    last_print = 0.0
+    print(f"[dipoletools.blackjax] Sampling: n_live={n_live}, n_delete={n_delete}, "
+          f"n_dim={n_dim}, num_mcmc_steps={num_mcmc_steps}, dlogz={dlogz}")
     for it in range(max_iterations):
         rng_key, step_key = jax.random.split(rng_key)
         state, info = step_jit(step_key, state)
         dead.append(info)
+        n_dead += int(info.particles.loglikelihood.shape[0])
         # Cheap termination heuristic: stop when the largest live log-L is
         # smaller than the log-sum-exp of the dead points minus dlogz —
         # i.e. the remaining evidence in live points is < dlogz.
@@ -575,8 +626,25 @@ def run_blackjax(analyser, savedir=None, name=None, seed=0,
             [d.particles.loglikelihood for d in dead], axis=0
         )
         logZ_dead = jax.scipy.special.logsumexp(dead_logL)
-        if float(max_live) < float(logZ_dead) - dlogz:
+        max_live_f = float(max_live)
+        logZ_dead_f = float(logZ_dead)
+        # Live progress: refresh roughly every 0.5s so the user sees activity.
+        now = time.time()
+        if now - last_print > 0.5:
+            remaining = max_live_f - logZ_dead_f
+            sys.stdout.write(
+                f"\r[dipoletools.blackjax] iter={it+1:5d} dead={n_dead:7d} "
+                f"logZ~{logZ_dead_f:+.3f} maxL_live={max_live_f:+.3f} "
+                f"dlogZ_remain={remaining:+.3f} elapsed={now - t0:6.1f}s"
+            )
+            sys.stdout.flush()
+            last_print = now
+        if max_live_f < logZ_dead_f - dlogz:
             break
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+    print(f"[dipoletools.blackjax] Finished after {it+1} iterations, "
+          f"{n_dead} dead points, elapsed {time.time() - t0:.1f}s")
 
     final_info = ns_utils.finalise(state, dead)
 

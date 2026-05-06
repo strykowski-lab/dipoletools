@@ -9,3 +9,4 @@ build/
 *.pyc
 examples/example_outputs/*
 .pytest_cache/
+test.py
