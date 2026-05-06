@@ -46,6 +46,11 @@ examples = [
     "dynesty>=2.0",
     "corner>=2.2",
 ]
+blackjax = [
+    "jax>=0.4",
+    # Nested sampling lives on the handley-lab blackjax fork's nested_sampling branch.
+    "blackjax @ git+https://github.com/handley-lab/blackjax.git@nested_sampling",
+]
 
 [project.urls]
 Homepage = "https://github.com/mali/dipoletools"

@@ -2,17 +2,13 @@
 
 import copy
 import inspect
-import os
 import warnings
 
 import numpy as np
 import healpy as hp
-import scipy as sp
 import matplotlib.pyplot as plt
-from scipy.special import gammaln
 
-from ._utils import (ang2vec, r2d, d2r, convert_lonlat, convert_thetaphi,
-                      lonlat_names)
+from ._utils import (ang2vec, d2r, convert_lonlat, lonlat_names)
 from ._defaults import DEFAULT_PRIORS
 
 
@@ -913,7 +909,7 @@ class Analyser:
         return "Priors:\n" + "\n".join(lines)
 
     # ------------------------------------------------------------------
-    # ultranest
+    # Sampler dispatch
     # ------------------------------------------------------------------
     def ultranest(self, savedir=None, name=None, min_num_live_points=400,
                   dlogz=0.5, frac_remain=0.01, step=False, step_nsteps=None,
@@ -935,533 +931,58 @@ class Analyser:
         step : bool
             If True, attach a ``ultranest.stepsampler.SliceSampler`` to the
             ReactiveNestedSampler. Strongly recommended for models with
-            more than ~5 parameters (e.g. dipole + quadrupole) where the
-            default rejection sampler struggles to shrink volumes.
+            more than ~5 parameters.
         step_nsteps : int, optional
-            Number of slice steps per new live point. If None, defaults to
-            ``2 * len(param_names)``.
+            Slice steps per new live point. Default ``2 * len(param_names)``.
         seed : int, optional
-            Random seed for reproducibility. Sets numpy's global seed before
-            sampler construction.
+            Random seed for reproducibility.
         **sampler_kwargs
-            Additional kwargs passed to ReactiveNestedSampler.run().
+            Additional kwargs forwarded to ReactiveNestedSampler.run().
         """
-        import ultranest
-        import ultranest.stepsampler
-
-        if self._map is None:
-            raise ValueError("No map loaded.")
-        if self._D is None:
-            import warnings
-            import scipy.constants as _sc
-            self._D = 369.83e3 / _sc.c
-            warnings.warn(
-                "D not specified; falling back to v_CMB/c = "
-                f"{self._D:.4e}. Pass D= or call "
-                "Analyser.expected_amplitude() for a catalogue-derived value."
-            )
-        if self._model_config is None:
-            self.model()
-
-        is_legacy_joint = self._map2 is not None
-
-        if is_legacy_joint and self._D2 is None:
-            raise ValueError("d2 must be set for joint analysis.")
-        if is_legacy_joint and self._model2_config is None:
-            raise ValueError("model2 must be configured for joint analysis.")
-
-        # Set up save directory
-        if savedir is not None:
-            self._savedir = savedir
-            os.makedirs(savedir, exist_ok=True)
-
-        if seed is not None:
-            np.random.seed(seed)
-
-        # Build the likelihood and prior transform
-        if self._is_composite:
-            param_names, loglike, ptform = self._build_joint_n()
-        elif is_legacy_joint:
-            param_names, loglike, ptform = self._build_joint()
-        else:
-            param_names, loglike, ptform = self._build_single()
-
-        log_dir = savedir
-        sampler = ultranest.ReactiveNestedSampler(
-            param_names, loglike, ptform, log_dir=log_dir
+        from . import _ultranest as _un
+        return _un.run_ultranest(
+            self, savedir=savedir, name=name,
+            min_num_live_points=min_num_live_points, dlogz=dlogz,
+            frac_remain=frac_remain, step=step, step_nsteps=step_nsteps,
+            seed=seed, **sampler_kwargs,
         )
 
-        if step:
-            import ultranest.stepsampler as _ss
-            nsteps = step_nsteps if step_nsteps is not None else 2 * len(param_names)
-            sampler.stepsampler = _ss.SliceSampler(
-                nsteps=nsteps,
-                generate_direction=_ss.generate_mixture_random_direction,
-            )
+    def blackjax(self, savedir=None, name=None, seed=0,
+                 n_live=500, n_delete=300, num_mcmc_steps=None,
+                 dlogz=0.5, max_iterations=10000):
+        """Run GPU-accelerated nested sampling with BlackJAX.
 
-        run_kwargs = {
-            'min_num_live_points': min_num_live_points,
-            'dlogz': dlogz,
-            'frac_remain': frac_remain,
-        }
-        run_kwargs.update(sampler_kwargs)
-        sampler.run(**run_kwargs)
+        Reduced scope compared to ``.ultranest(...)``: supports gaussian,
+        poisson, general_poisson, and the ecliptic-bias correction; does not
+        yet support ell>=2 or a second/additional dipole, and forces
+        ``v, theta, phi`` shared (everything else unshared) in joint
+        analyses. Use ``.ultranest(...)`` for those configurations.
+        """
+        from . import _blackjax as _bj
+        return _bj.run_blackjax(
+            self, savedir=savedir, name=name, seed=seed,
+            n_live=n_live, n_delete=n_delete, num_mcmc_steps=num_mcmc_steps,
+            dlogz=dlogz, max_iterations=max_iterations,
+        )
 
-        # Rename run directory if name is specified
-        if savedir is not None and name is not None:
-            run1_path = os.path.join(savedir, 'run1')
-            target_path = os.path.join(savedir, name)
-            if os.path.exists(run1_path) and not os.path.exists(target_path):
-                os.rename(run1_path, target_path)
-                self._savedir = target_path
-            elif os.path.exists(target_path):
-                self._savedir = target_path
-        elif savedir is not None:
-            run1_path = os.path.join(savedir, 'run1')
-            if os.path.exists(run1_path):
-                self._savedir = run1_path
-            else:
-                self._savedir = savedir
-
-        return sampler.results
-
-    # ------------------------------------------------------------------
-    # Build likelihood + prior transform
-    # ------------------------------------------------------------------
+    # Method shims so existing tests / external callers can keep doing
+    # ``analyser._build_joint_n()`` etc. The implementations live in
+    # ``_ultranest.py``.
     def _build_single(self):
-        """Build likelihood and prior for a single-dataset analysis."""
-        config = self._model_config
-        priors = self._priors_config
-        param_names = list(config['param_names'])
-
-        # Extract masked data and positions
-        nside = hp.npix2nside(len(self._map))
-        npix = len(self._map)
-        mask = self._mask
-        data_counts = self._map[mask]
-        pos = np.array(hp.pix2vec(nside, np.arange(npix))).T
-        data_positions = pos[mask]
-        D_survey = self._D
-
-        # Precompute ecliptic latitudes if bias is enabled
-        ecl_lat = None
-        cecl = None
-        if config.get('bias'):
-            cecl = self._bias_cecl
-            ecl_lat = self._compute_ecliptic_lat(nside, mask, self._map_coords)
-
-        if config['type'] == 'custom':
-            custom_like = config['likelihood']
-
-            def loglike(x):
-                return custom_like(x, data_counts, data_positions, D_survey)
-        else:
-            loglike = self._make_loglike(
-                config['type'], config['ell'], data_counts, data_positions,
-                D_survey, param_names, ecl_lat, cecl,
-                second_dipole=config.get('second_dipole'),
-            )
-
-        ptform = self._make_ptform(param_names, priors)
-
-        return param_names, loglike, ptform
+        from . import _ultranest as _un
+        return _un.build_single(self)
 
     def _build_joint(self):
-        """Build likelihood and prior for a joint two-dataset analysis."""
-        config1 = self._model_config
-        config2 = self._model2_config
-        priors1 = self._priors_config
-        priors2 = self._priors2_config
-
-        params1 = list(config1['param_names'])
-        params2_base = list(config2['param_names'])
-
-        # Build the combined parameter list
-        # params2 with '2' suffix for non-shared, original name for shared
-        params2_mapped = []
-        for p in params2_base:
-            if p in self._shared_parameters:
-                params2_mapped.append(p)
-            else:
-                params2_mapped.append(p + '2')
-
-        # Unique combined parameters (preserving order)
-        combined_params = list(params1)
-        for p in params2_mapped:
-            if p not in combined_params:
-                combined_params.append(p)
-
-        # Combined priors
-        combined_priors = {}
-        for p in combined_params:
-            if p in priors1:
-                combined_priors[p] = priors1[p]
-            elif p in priors2:
-                combined_priors[p] = priors2[p]
-
-        # Extract data for both datasets
-        nside1 = hp.npix2nside(len(self._map))
-        mask1 = self._mask
-        counts1 = self._map[mask1]
-        pos1 = np.array(hp.pix2vec(nside1, np.arange(len(self._map)))).T[mask1]
-
-        nside2 = hp.npix2nside(len(self._map2))
-        mask2 = self._mask2
-        counts2 = self._map2[mask2]
-        pos2 = np.array(hp.pix2vec(nside2, np.arange(len(self._map2)))).T[mask2]
-
-        D1 = self._D
-        D2 = self._D2
-
-        # Check if coordinate systems differ
-        need_coord_convert = (self._map_coords != self._map2_coords)
-        from_sys = self._map_coords
-        to_sys = self._map2_coords
-
-        # Precompute ecliptic latitudes if bias is enabled on either model
-        ecl_lat1 = None
-        cecl1 = None
-        if config1.get('bias'):
-            cecl1 = self._bias_cecl
-            ecl_lat1 = self._compute_ecliptic_lat(nside1, mask1, self._map_coords)
-
-        ecl_lat2 = None
-        cecl2 = None
-        if config2.get('bias'):
-            cecl2 = self._bias_cecl_2
-            ecl_lat2 = self._compute_ecliptic_lat(nside2, mask2, self._map2_coords)
-
-        # Build individual likelihoods
-        if config1['type'] == 'custom':
-            def loglike1_fn(x_dict):
-                x = [x_dict[p] for p in params1]
-                return config1['likelihood'](x, counts1, pos1, D1)
-        else:
-            loglike1_fn = self._make_loglike_dict(
-                config1['type'], config1['ell'], counts1, pos1, D1, params1,
-                ecl_lat1, cecl1
-            )
-
-        if config2['type'] == 'custom':
-            def loglike2_fn(x_dict):
-                x = [x_dict[p2] for p2 in params2_mapped]
-                return config2['likelihood'](x, counts2, pos2, D2)
-        else:
-            loglike2_fn = self._make_loglike_dict_joint(
-                config2['type'], config2['ell'], counts2, pos2, D2,
-                params2_base, params2_mapped, need_coord_convert, from_sys, to_sys,
-                ecl_lat2, cecl2
-            )
-
-        # Build the joint likelihood
-        def loglike(x):
-            x_dict = {p: x[i] for i, p in enumerate(combined_params)}
-            return loglike1_fn(x_dict) + loglike2_fn(x_dict)
-
-        ptform = self._make_ptform(combined_params, combined_priors)
-
-        return combined_params, loglike, ptform
+        from . import _ultranest as _un
+        return _un.build_joint(self)
 
     def _build_joint_n(self):
-        """Build likelihood and prior for N-way joint analysis (N >= 2 datasets).
+        from . import _ultranest as _un
+        return _un.build_joint_n(self)
 
-        Handles both the compositional N=2 case (uses legacy '2' suffix for
-        byte-for-byte chain compatibility) and the N>=3 case (uses '_name' suffix).
-        """
-        datasets = [self] + list(self._children.values())
-        names = ['a1'] + list(self._children.keys())
-        n_total = len(datasets)
-        use_legacy_n2 = (n_total == 2)
-
-        # Validate: only mono+dipole (ell=[0] or ell=[0,1]) is supported.
-        # TODO: Add quadrupole/higher support in a follow-up PR.
-        for d, dname in zip(datasets, names):
-            if d._model_config is None:
-                raise ValueError(f"Dataset {dname!r} has no model configured.")
-            if d._priors_config is None:
-                raise ValueError(f"Dataset {dname!r} has no priors configured.")
-            if d._map is None:
-                raise ValueError(f"Dataset {dname!r} has no map.")
-            if d._D is None:
-                raise ValueError(f"Dataset {dname!r} has D not set.")
-            ell = d._model_config['ell']
-            if any(l > 1 for l in ell):
-                raise NotImplementedError(
-                    f"N-way joint analysis supports only ell=[0] or ell=[0,1]. "
-                    f"Dataset {dname!r} has ell={ell}. "
-                    "Quadrupole/higher support is planned for a follow-up PR."
-                )
-            if d._map_coords != self._map_coords:
-                raise ValueError(
-                    f"Dataset {dname!r} has map_coords={d._map_coords!r} but "
-                    f"self has map_coords={self._map_coords!r}. "
-                    "Heterogeneous coordinate systems are not yet supported."
-                )
-
-        combined_params = []
-        combined_priors = {}
-        per_dataset_loglikes = []
-
-        for i, (d, dname) in enumerate(zip(datasets, names)):
-            config = d._model_config
-            priors = d._priors_config
-            params_base = list(config['param_names'])
-
-            # Build mapped param names with appropriate suffix
-            params_mapped = []
-            for p in params_base:
-                if p in self._shared_parameters:
-                    params_mapped.append(p)
-                elif use_legacy_n2 and i == 0:
-                    # Self in N=2: no suffix (matches legacy _build_joint)
-                    params_mapped.append(p)
-                elif use_legacy_n2 and i == 1:
-                    # Single child in N=2: '2' suffix (byte-compat with legacy)
-                    params_mapped.append(p + '2')
-                else:
-                    # N>=3: use _name suffix for all datasets including self
-                    params_mapped.append(f'{p}_{dname}')
-
-            # Accumulate combined parameter list (no duplicates)
-            for pm in params_mapped:
-                if pm not in combined_params:
-                    combined_params.append(pm)
-
-            # Accumulate combined priors
-            for p_base, p_mapped in zip(params_base, params_mapped):
-                if p_mapped not in combined_priors:
-                    if p_base in self._shared_parameters:
-                        combined_priors[p_mapped] = self._priors_config[p_base]
-                    else:
-                        combined_priors[p_mapped] = priors.get(
-                            p_base,
-                            DEFAULT_PRIORS.get(
-                                p_base,
-                                {'type': 'uniform', 'low': 0.0, 'high': 1.0}
-                            )
-                        )
-
-            # Prepare per-dataset data
-            nside = hp.npix2nside(len(d._map))
-            mask = d._mask
-            data_counts = d._map[mask]
-            pos = np.array(hp.pix2vec(nside, np.arange(len(d._map)))).T
-            data_positions = pos[mask]
-            D_survey = d._D
-
-            ecl_lat = None
-            cecl = None
-            if config.get('bias'):
-                cecl = d._bias_cecl
-                ecl_lat = self._compute_ecliptic_lat(nside, mask, d._map_coords)
-
-            # Reuse _make_loglike_dict_joint (no coord conversion needed: all
-            # children are required to share map_coords, validated above).
-            fn = self._make_loglike_dict_joint(
-                config['type'], config['ell'], data_counts, data_positions,
-                D_survey, params_base, params_mapped,
-                need_convert=False, from_sys=self._map_coords,
-                to_sys=self._map_coords, ecl_lat=ecl_lat, cecl=cecl,
-            )
-            per_dataset_loglikes.append(fn)
-
-        def loglike(x):
-            x_dict = {p: x[i] for i, p in enumerate(combined_params)}
-            return sum(fn(x_dict) for fn in per_dataset_loglikes)
-
-        ptform = self._make_ptform(combined_params, combined_priors)
-        return combined_params, loglike, ptform
-
-    # ------------------------------------------------------------------
-    # Ecliptic latitude computation
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _compute_ecliptic_lat(nside, mask, map_coords):
-        """Compute ecliptic latitudes (degrees) for unmasked pixels."""
-        from astropy.coordinates import SkyCoord
-        from astropy import units as u
-
-        npix = hp.nside2npix(nside)
-        theta_pix, phi_pix = hp.pix2ang(nside, np.arange(npix))
-        lon_deg = np.degrees(phi_pix)
-        lat_deg = 90.0 - np.degrees(theta_pix)
-
-        if map_coords == 'G':
-            sc = SkyCoord(l=lon_deg * u.deg, b=lat_deg * u.deg, frame='galactic')
-        elif map_coords == 'C':
-            sc = SkyCoord(ra=lon_deg * u.deg, dec=lat_deg * u.deg, frame='icrs')
-        elif map_coords == 'E':
-            # Already ecliptic
-            return lat_deg[mask]
-        else:
-            raise ValueError(f"Unknown coordinate system: {map_coords}")
-
-        ecl = sc.transform_to('barycentricmeanecliptic')
-        return ecl.lat.deg[mask]
-
-    # ------------------------------------------------------------------
-    # Likelihood factories
-    # ------------------------------------------------------------------
-    def _make_loglike(self, type, ell, data_counts, data_positions, D_survey,
-                      param_names, ecl_lat=None, cecl=None, second_dipole=None):
-        """Create a log-likelihood function for single analysis."""
-        def loglike(x):
-            params = {p: x[i] for i, p in enumerate(param_names)}
-            expected = self._compute_expected(params, data_positions, D_survey, ell,
-                                              second_dipole=second_dipole)
-            if ecl_lat is not None:
-                bias = params.get('bias', 0.0)
-                expected = expected * (1 - bias * cecl * np.abs(ecl_lat))
-            return self._loglike_value(type, data_counts, expected, params)
-        return loglike
-
-    def _make_loglike_dict(self, type, ell, data_counts, data_positions, D_survey,
-                           param_names, ecl_lat=None, cecl=None):
-        """Create a log-likelihood function that takes a param dict."""
-        def loglike(x_dict):
-            params = {p: x_dict[p] for p in param_names}
-            expected = self._compute_expected(params, data_positions, D_survey, ell)
-            if ecl_lat is not None:
-                bias = params.get('bias', 0.0)
-                expected = expected * (1 - bias * cecl * np.abs(ecl_lat))
-            return self._loglike_value(type, data_counts, expected, params)
-        return loglike
-
-    def _make_loglike_dict_joint(self, type, ell, data_counts, data_positions, D_survey,
-                                 params_base, params_mapped, need_convert, from_sys, to_sys,
-                                 ecl_lat=None, cecl=None):
-        """Create a log-likelihood for the second model in a joint analysis."""
-        def loglike(x_dict):
-            # Map combined param names back to model2's base param names
-            params = {}
-            for base, mapped in zip(params_base, params_mapped):
-                params[base] = x_dict[mapped]
-
-            if need_convert and 'theta' in params and 'phi' in params:
-                theta_orig = params['theta']
-                phi_orig = params['phi']
-                theta_new, phi_new = convert_thetaphi(
-                    np.atleast_1d(theta_orig), np.atleast_1d(phi_orig),
-                    from_sys, to_sys
-                )
-                params['theta'] = theta_new[0]
-                params['phi'] = phi_new[0]
-
-            expected = self._compute_expected(params, data_positions, D_survey, ell)
-            if ecl_lat is not None:
-                bias = params.get('bias', 0.0)
-                expected = expected * (1 - bias * cecl * np.abs(ecl_lat))
-            return self._loglike_value(type, data_counts, expected, params)
-        return loglike
-
-    # ------------------------------------------------------------------
-    # Expected counts and log-likelihood evaluation
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _compute_expected(params, data_positions, D_survey, ell, second_dipole=None):
-        """Compute expected counts from model parameters."""
-        N = params.get('N', 1.0)
-        expected = np.full(len(data_positions), N, dtype=float)
-
-        if 1 in ell and 'v' in params:
-            v = params['v']
-            theta = params['theta']
-            phi = params['phi']
-            D = v * D_survey
-            dipole_vec = ang2vec(theta, phi)
-            cos_angle = np.sum(dipole_vec * data_positions, axis=1)
-            expected = N * (1 + D * cos_angle)
-
-        if 2 in ell and 'Q' in params:
-            Q = params['Q']
-            theta_a = params['theta_a']
-            phi_a = params['phi_a']
-            theta_b = params['theta_b']
-            phi_b = params['phi_b']
-            a = ang2vec(theta_a, phi_a)
-            b = ang2vec(theta_b, phi_b)
-            Q_prime = np.outer(a, b)
-            Q_star = 0.5 * (Q_prime + Q_prime.T)
-            Q_hat = Q_star - np.trace(Q_star) / 3
-            quad_term = np.einsum('ij,jk,ik->i', data_positions, Q_hat, data_positions)
-            if 1 in ell and 'v' in params:
-                v = params['v']
-                D = v * D_survey
-                cos_angle = np.sum(ang2vec(params['theta'], params['phi'])
-                                   * data_positions, axis=1)
-                expected = N * (1 + D * cos_angle + Q * quad_term)
-            else:
-                expected = N * (1 + Q * quad_term)
-
-        # Second-dipole contribution (fixed and/or free components).
-        if second_dipole is not None:
-            if second_dipole['dir_vec'] is not None:
-                sd_vec = second_dipole['dir_vec']
-            else:
-                sd_vec = ang2vec(params['theta_sd'], params['phi_sd'])
-            if second_dipole['fix_v'] is not None:
-                v_sd = second_dipole['fix_v']
-            else:
-                v_sd = params['v_sd']
-            D_sd = v_sd * D_survey
-            cos_angle_sd = np.sum(sd_vec * data_positions, axis=1)
-            expected = expected + N * D_sd * cos_angle_sd
-
-        # Higher ell modes using spherical harmonics
-        for l_mode in sorted(ell):
-            if l_mode > 2:
-                for m in range(-l_mode, l_mode + 1):
-                    key = f'a_{l_mode}_{m}'
-                    if key in params:
-                        theta_pix = np.arccos(data_positions[:, 2] /
-                                              np.linalg.norm(data_positions, axis=1))
-                        phi_pix = np.arctan2(data_positions[:, 1], data_positions[:, 0])
-                        if m >= 0:
-                            Ylm = sp.special.sph_harm(m, l_mode, phi_pix, theta_pix).real
-                        else:
-                            Ylm = sp.special.sph_harm(-m, l_mode, phi_pix, theta_pix).imag
-                        expected += N * params[key] * Ylm
-
-        return expected
-
-    @staticmethod
-    def _loglike_value(type, data_counts, expected, params=None):
-        """Compute the log-likelihood value."""
-        expected = np.clip(expected, 1e-10, None)
-
-        if type == 'poisson':
-            return np.sum(sp.stats.poisson.logpmf(data_counts.astype(int), expected))
-        elif type == 'general_poisson':
-            b = params.get('gp_dispersion', 0.0) if params else 0.0
-            k = data_counts
-            lam = expected
-            term1 = np.log(np.clip(lam * (1 - b), 1e-10, None))
-            term2 = (k - 1) * np.log(np.clip(lam * (1 - b) + k * b, 1e-10, None))
-            term3 = gammaln(k + 1)
-            term4 = lam * (1 - b)
-            term5 = k * b
-            return np.sum(term1 + term2 - term3 - term4 - term5)
-        elif type == 'gaussian':
-            std = np.std(data_counts)
-            return np.sum(sp.stats.norm.logpdf(data_counts, expected, std))
-        else:
-            raise ValueError(f"Unknown likelihood type: {type}")
-
-    @staticmethod
-    def _make_ptform(param_names, priors):
-        """Create a prior transform function for UltraNest."""
-        def ptform(u):
-            x = np.zeros(len(param_names))
-            for i, p in enumerate(param_names):
-                cfg = priors.get(p, {'type': 'uniform', 'low': 0.0, 'high': 1.0})
-                if cfg['type'] == 'uniform':
-                    x[i] = cfg['low'] + u[i] * (cfg['high'] - cfg['low'])
-                elif cfg['type'] == 'polar':
-                    x[i] = np.arccos(2 * u[i] - 1)
-                else:
-                    x[i] = u[i]
-            return x
-        return ptform
+    def _make_loglike_dict_joint(self, *args, **kwargs):
+        from . import _ultranest as _un
+        return _un.make_loglike_dict_joint(*args, **kwargs)
 
     # ------------------------------------------------------------------
     # show

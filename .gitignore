@@ -1,4 +1,4 @@
-.venv/
+.venv*
 venv/
 .vscode/
 .claude/
@@ -9,3 +9,4 @@ build/
 *.pyc
 examples/example_outputs/*
 .pytest_cache/
+test.py
