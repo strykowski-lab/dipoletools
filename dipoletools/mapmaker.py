@@ -555,6 +555,82 @@ class MapMaker:
         return counts
 
     # ------------------------------------------------------------------
+    # noise_map
+    # ------------------------------------------------------------------
+    def noise_map(self, nside=None, catalogue=None):
+        """Build a per-pixel noise/RMS HEALPix map from a per-source noise column.
+
+        Aggregates the catalogue's ``noise`` column (resolved via labels) by
+        taking the median noise of all sources falling in each pixel. Pixels
+        with no sources contain NaN. Used by the ``rms=True`` likelihood path
+        (see ``Analyser.model``).
+
+        Parameters
+        ----------
+        nside : int, optional
+            HEALPix nside. Uses ``self.nside`` if not given.
+        catalogue : str, optional
+            Catalogue name. Defaults to first catalogue.
+        """
+        if nside is None:
+            nside = self._nside
+
+        cat_name = catalogue if catalogue is not None else self._catalogue_order[0]
+        if cat_name not in self._catalogues:
+            raise ValueError(f"No catalogue named '{cat_name}'.")
+
+        # Trigger default cuts via _compute_map if user hasn't called map yet.
+        if self._map is None:
+            self._compute_map(nside=nside, catalogue=cat_name)
+
+        cat = self._catalogues[cat_name]
+        labels = self._labels[cat_name]
+
+        noise_col = labels.get('noise', 'noise')
+        if noise_col not in cat.columns:
+            raise ValueError(
+                f"Catalogue '{cat_name}' has no 'noise' column "
+                f"(looked for {noise_col!r}). Add a 'noise' label or column."
+            )
+
+        lon_name, lat_name = lonlat_names(self._coord_system)
+        lon_col = labels.get(lon_name, lon_name)
+        lat_col = labels.get(lat_name, lat_name)
+        if lon_col not in cat.columns:
+            for try_lon, try_lat in [('ra', 'dec'), ('l', 'b')]:
+                if try_lon in cat.columns:
+                    lon_col, lat_col = try_lon, try_lat
+                    break
+
+        lon = np.asarray(cat[lon_col], dtype=float)
+        lat = np.asarray(cat[lat_col], dtype=float)
+        noise = np.asarray(cat[noise_col], dtype=float)
+
+        map_sys = self._map_coords or self._coord_system
+        if map_sys != self._coord_system:
+            lon, lat = convert_lonlat(lon, lat, self._coord_system, map_sys)
+
+        npix = hp.nside2npix(nside)
+        pix = hp.ang2pix(nside, lon, lat, lonlat=True)
+
+        # Per-pixel median: group source noises by pixel index. Drop non-finite.
+        finite = np.isfinite(noise)
+        pix_f = pix[finite]
+        noise_f = noise[finite]
+
+        order = np.argsort(pix_f, kind='stable')
+        pix_sorted = pix_f[order]
+        noise_sorted = noise_f[order]
+        unique_pix, starts = np.unique(pix_sorted, return_index=True)
+        ends = np.r_[starts[1:], len(pix_sorted)]
+
+        out = np.full(npix, np.nan, dtype=float)
+        for p, s, e in zip(unique_pix, starts, ends):
+            out[p] = np.median(noise_sorted[s:e])
+
+        return out
+
+    # ------------------------------------------------------------------
     # show
     # ------------------------------------------------------------------
     def show(self, **kwargs):

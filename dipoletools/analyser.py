@@ -48,6 +48,20 @@ def _resolve_second_dipole(second_dipole, map_coords):
     }
 
 
+def _rms_power_law_fit(rms_map_pixels, density_map_pixels):
+    """Fit ``a * (rms / median(rms)) ** -b`` to (rms, density) over unmasked
+    pixels and return ``(rms_ref, slope)``. Used to centre the default
+    ``rms_slope`` prior. Mirrors ``dipoleska.utils.math.rms_power_law_fit``.
+    """
+    from scipy.optimize import curve_fit
+    rms_ref = float(np.nanmedian(rms_map_pixels))
+    finite = np.isfinite(rms_map_pixels) & np.isfinite(density_map_pixels)
+    x = rms_map_pixels[finite] / rms_ref
+    y = density_map_pixels[finite]
+    popt, _ = curve_fit(lambda xi, a, b: a * xi ** (-b), x, y)
+    return rms_ref, float(popt[1])
+
+
 def _introspect_name(obj, frame):
     """Return the first local variable name in *frame* that is *obj*, or None."""
     if frame is None:
@@ -159,6 +173,14 @@ class Analyser:
         self._bias_cecl = None
         self._bias_cecl_2 = None
 
+        # RMS likelihood state (set by model/model2 when rms=True)
+        self._rms_map = None
+        self._rms_map_2 = None
+        self._rms_ref = None
+        self._rms_ref_2 = None
+        self._rms_slope_fit = None
+        self._rms_slope_fit_2 = None
+
         # Sampling results
         self._savedir = None
         self._smooth_map = None
@@ -230,6 +252,7 @@ class Analyser:
     # model
     # ------------------------------------------------------------------
     def model(self, type='poisson', ell=None, bias=False, bias_cecl=9.15e-4,
+              rms=False, rms_map=None,
               likelihood=None, param_names=None, second_dipole=None):
         """Configure the model for nested sampling.
 
@@ -288,11 +311,13 @@ class Analyser:
                 )
             sd_resolved = _resolve_second_dipole(second_dipole, self._map_coords)
             param_names = self._params_from_ell(ell, type=type, bias=bias,
+                                                rms=rms,
                                                 second_dipole=sd_resolved)
             self._model_config = {
                 'type': type,
                 'ell': ell,
                 'bias': bias,
+                'rms': rms,
                 'likelihood': None,
                 'param_names': param_names,
                 'second_dipole': sd_resolved,
@@ -302,6 +327,10 @@ class Analyser:
         if bias:
             self._bias_cecl = bias_cecl
 
+        # Store rms data (resolve rms_map from MapMaker if not supplied)
+        if rms:
+            self._configure_rms(which=1, rms_map=rms_map)
+
         # Auto-setup priors if not already set
         if self._priors_config is None:
             self.priors()
@@ -310,6 +339,7 @@ class Analyser:
             return self._model_summary(self._model_config)
 
     def model2(self, type='poisson', ell=None, bias=False, bias_cecl=9.15e-4,
+               rms=False, rms_map=None,
                likelihood=None, param_names=None, shared_parameters=None):
         """Configure the second model for joint analysis.
 
@@ -353,11 +383,13 @@ class Analyser:
                     f"Unknown model type '{type}'. "
                     "Choose 'poisson', 'general_poisson', or 'gaussian'."
                 )
-            param_names = self._params_from_ell(ell, type=type, bias=bias)
+            param_names = self._params_from_ell(ell, type=type, bias=bias,
+                                                rms=rms)
             self._model2_config = {
                 'type': type,
                 'ell': ell,
                 'bias': bias,
+                'rms': rms,
                 'likelihood': None,
                 'param_names': param_names,
             }
@@ -365,6 +397,10 @@ class Analyser:
         # Store bias data for model 2
         if bias:
             self._bias_cecl_2 = bias_cecl
+
+        # Store rms data for model 2
+        if rms:
+            self._configure_rms(which=2, rms_map=rms_map)
 
         if shared_parameters is not None:
             self._shared_parameters = shared_parameters
@@ -376,7 +412,8 @@ class Analyser:
             return self._model_summary(self._model2_config)
 
     @staticmethod
-    def _params_from_ell(ell, type='poisson', bias=False, second_dipole=None):
+    def _params_from_ell(ell, type='poisson', bias=False, rms=False,
+                         second_dipole=None):
         """Generate parameter names from ell modes, model type, and bias flag.
 
         If ``second_dipole`` is provided (a dict from _resolve_second_dipole),
@@ -400,6 +437,8 @@ class Analyser:
                 params.extend(['theta_sd', 'phi_sd'])
         if bias:
             params.append('bias')
+        if rms:
+            params.append('rms_slope')
         if type == 'general_poisson':
             params.append('gp_dispersion')
         return params
@@ -411,8 +450,44 @@ class Analyser:
         summary += f"Ell modes: {config['ell']}\n"
         if config.get('bias'):
             summary += "Bias: ecliptic latitude\n"
+        if config.get('rms'):
+            summary += "RMS scaling: per-pixel noise power-law\n"
         summary += f"Parameters: {config['param_names']}"
         return summary
+
+    def _configure_rms(self, which, rms_map):
+        """Resolve and store the RMS map and reference value for ``model``
+        (which=1) or ``model2`` (which=2). Auto-derives ``rms_map`` from a
+        MapMaker's ``noise_map`` when ``rms_map`` is None and the dataset was
+        built from a MapMaker carrying a ``noise`` label.
+        """
+        if which == 1:
+            mm = self._mapmaker
+            target_map = self._map
+        else:
+            mm = None  # model2 (legacy) doesn't store a MapMaker
+            target_map = self._map2
+
+        if rms_map is None:
+            if mm is None:
+                raise ValueError(
+                    "rms=True requires rms_map=, or that the Analyser was "
+                    "built from a MapMaker carrying a 'noise' column."
+                )
+            nside = hp.npix2nside(len(target_map))
+            rms_map = mm.noise_map(nside=nside)
+
+        rms_map = np.asarray(rms_map, dtype=float)
+        if len(rms_map) != len(target_map):
+            raise ValueError(
+                f"rms_map length {len(rms_map)} does not match map length "
+                f"{len(target_map)}."
+            )
+
+        if which == 1:
+            self._rms_map = rms_map
+        else:
+            self._rms_map_2 = rms_map
 
     # ------------------------------------------------------------------
     # expected_amplitude
@@ -677,6 +752,21 @@ class Analyser:
                     'high': mean_counts * 1.1,
                 }
 
+        # Handle rms_slope auto-prior (centred on power-law fit slope)
+        if ('rms_slope' in self._priors_config
+                and self._priors_config['rms_slope']['type'] == 'auto'):
+            if self._map is not None and self._rms_map is not None:
+                eff_mask = self._mask & np.isfinite(self._rms_map)
+                rms_ref, slope = _rms_power_law_fit(
+                    self._rms_map[eff_mask], self._map[eff_mask]
+                )
+                self._rms_ref = rms_ref
+                self._rms_slope_fit = slope
+                lo, hi = sorted([0.75 * slope, 1.25 * slope])
+                self._priors_config['rms_slope'] = {
+                    'type': 'uniform', 'low': lo, 'high': hi,
+                }
+
         # Apply user overrides
         for p, val in kwargs.items():
             if isinstance(val, (list, tuple)) and len(val) == 2:
@@ -733,6 +823,23 @@ class Analyser:
                     'type': 'uniform',
                     'low': mean_counts * 0.9,
                     'high': mean_counts * 1.1,
+                }
+
+        # Handle rms_slope/rms_slope2 auto-prior for model 2
+        for key in ('rms_slope', 'rms_slope2'):
+            cfg = self._priors2_config.get(key)
+            if cfg is None or cfg.get('type') != 'auto':
+                continue
+            if self._map2 is not None and self._rms_map_2 is not None:
+                eff_mask = self._mask2 & np.isfinite(self._rms_map_2)
+                rms_ref, slope = _rms_power_law_fit(
+                    self._rms_map_2[eff_mask], self._map2[eff_mask]
+                )
+                self._rms_ref_2 = rms_ref
+                self._rms_slope_fit_2 = slope
+                lo, hi = sorted([0.75 * slope, 1.25 * slope])
+                self._priors2_config[key] = {
+                    'type': 'uniform', 'low': lo, 'high': hi,
                 }
 
         # Apply user overrides

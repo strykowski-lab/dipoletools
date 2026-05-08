@@ -134,7 +134,7 @@ SHORTHAND_CATALOGUES = {
     'racs-high': {
         'file': 'RACS-high_sources.fits',
         'labels': {'ra': 'ra', 'dec': 'dec', 'flux': 'total_flux',
-                   'flux_err': 'e_total_flux', 'id': 'id'},
+                   'flux_err': 'e_total_flux', 'id': 'id', 'noise': 'noise'},
         'cuts': [{'col': 'total_flux', 'min': 15, 'max': 1000}],
     },
     'local': {
@@ -173,6 +173,7 @@ DEFAULT_PRIORS = {
     'theta_b': {'type': 'polar'},
     'phi_b': {'type': 'uniform', 'low': 0.0, 'high': 2 * np.pi},
     'bias': {'type': 'uniform', 'low': -2.0, 'high': 2.0},
+    'rms_slope': {'type': 'auto'},  # ±25% of power-law fit slope
     'gp_dispersion': {'type': 'uniform', 'low': 0.0, 'high': 1.0},
     # Secondary ("second") dipole parameters for two-dipole models.
     'v_sd': {'type': 'uniform', 'low': 0.0, 'high': 20.0},
@@ -191,6 +192,7 @@ PLOT_LABELS_BASE = {
     'N': r'\bar{N}',
     'Q': r'Q',
     'bias': r'b_{\rm ecl}',
+    'rms_slope': r'x_{\rm rms}',
     'gp_dispersion': r'b_{\rm GP}',
     'logZ': r'\ln\mathcal{Z}',
     'kl': r'\mathcal{D}_{\rm KL}',

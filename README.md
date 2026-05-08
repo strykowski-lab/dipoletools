@@ -123,6 +123,12 @@ print(t.table())
 All models support:
 - Arbitrary multipole combinations via `ell=[0, 1, 2, ...]`
 - Ecliptic latitude bias correction (`bias=True`)
+- RMS-noise scaling of the rate (`rms=True`): adds an `rms_slope` parameter
+  and multiplies the expected counts by `(rms_pix / median(rms))^(-rms_slope)`,
+  following Wagenveld et al. (2023). Auto-derives a per-pixel RMS map from
+  the catalogue's `noise` column when the Analyser is built from a MapMaker;
+  otherwise pass `rms_map=` directly. Composes with `bias=True` and
+  `type='general_poisson'`. UltraNest-only (not yet supported by `.blackjax(...)`).
 - Joint N-dataset analysis with shared parameters
 - Adding an additional dipole (with optional fixed parameters)
 - Custom likelihood functions
