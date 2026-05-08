@@ -154,36 +154,50 @@ def make_ptform(param_names, priors):
 # ----------------------------------------------------------------------
 # Likelihood factories
 # ----------------------------------------------------------------------
+def _apply_corrections(expected, params, ecl_lat, cecl, rms_pix, rms_ref):
+    """Multiply ``expected`` by the bias and/or RMS-scaling factors when
+    enabled. Both factors are multiplicative and compose; either can be None.
+    """
+    if ecl_lat is not None:
+        bias = params.get('bias', 0.0)
+        expected = expected * (1 - bias * cecl * np.abs(ecl_lat))
+    if rms_pix is not None:
+        rms_slope = params.get('rms_slope', 0.0)
+        expected = expected * (rms_pix / rms_ref) ** (-rms_slope)
+    return expected
+
+
 def make_loglike(type, ell, data_counts, data_positions, D_survey,
-                 param_names, ecl_lat=None, cecl=None, second_dipole=None):
+                 param_names, ecl_lat=None, cecl=None, second_dipole=None,
+                 rms_pix=None, rms_ref=None):
     """Create a log-likelihood function for single analysis."""
     def loglike(x):
         params = {p: x[i] for i, p in enumerate(param_names)}
         expected = compute_expected(params, data_positions, D_survey, ell,
                                     second_dipole=second_dipole)
-        if ecl_lat is not None:
-            bias = params.get('bias', 0.0)
-            expected = expected * (1 - bias * cecl * np.abs(ecl_lat))
+        expected = _apply_corrections(expected, params, ecl_lat, cecl,
+                                      rms_pix, rms_ref)
         return loglike_value(type, data_counts, expected, params)
     return loglike
 
 
 def make_loglike_dict(type, ell, data_counts, data_positions, D_survey,
-                     param_names, ecl_lat=None, cecl=None):
+                     param_names, ecl_lat=None, cecl=None,
+                     rms_pix=None, rms_ref=None):
     """Create a log-likelihood function that takes a param dict."""
     def loglike(x_dict):
         params = {p: x_dict[p] for p in param_names}
         expected = compute_expected(params, data_positions, D_survey, ell)
-        if ecl_lat is not None:
-            bias = params.get('bias', 0.0)
-            expected = expected * (1 - bias * cecl * np.abs(ecl_lat))
+        expected = _apply_corrections(expected, params, ecl_lat, cecl,
+                                      rms_pix, rms_ref)
         return loglike_value(type, data_counts, expected, params)
     return loglike
 
 
 def make_loglike_dict_joint(type, ell, data_counts, data_positions, D_survey,
                             params_base, params_mapped, need_convert, from_sys, to_sys,
-                            ecl_lat=None, cecl=None):
+                            ecl_lat=None, cecl=None,
+                            rms_pix=None, rms_ref=None):
     """Create a log-likelihood for the second model in a joint analysis."""
     def loglike(x_dict):
         params = {}
@@ -201,9 +215,8 @@ def make_loglike_dict_joint(type, ell, data_counts, data_positions, D_survey,
             params['phi'] = phi_new[0]
 
         expected = compute_expected(params, data_positions, D_survey, ell)
-        if ecl_lat is not None:
-            bias = params.get('bias', 0.0)
-            expected = expected * (1 - bias * cecl * np.abs(ecl_lat))
+        expected = _apply_corrections(expected, params, ecl_lat, cecl,
+                                      rms_pix, rms_ref)
         return loglike_value(type, data_counts, expected, params)
     return loglike
 
@@ -211,6 +224,15 @@ def make_loglike_dict_joint(type, ell, data_counts, data_positions, D_survey,
 # ----------------------------------------------------------------------
 # Build (param_names, loglike, ptform) for single / legacy-joint / N-joint
 # ----------------------------------------------------------------------
+def _resolve_mask_with_rms(base_mask, rms_map):
+    """If ``rms_map`` is provided, intersect with ~isnan(rms_map) so the
+    likelihood never sees NaN noise on an unmasked pixel.
+    """
+    if rms_map is None:
+        return base_mask
+    return base_mask & np.isfinite(rms_map)
+
+
 def build_single(analyser):
     """Build likelihood and prior for a single-dataset analysis."""
     config = analyser._model_config
@@ -219,7 +241,8 @@ def build_single(analyser):
 
     nside = hp.npix2nside(len(analyser._map))
     npix = len(analyser._map)
-    mask = analyser._mask
+    rms_map_full = analyser._rms_map if config.get('rms') else None
+    mask = _resolve_mask_with_rms(analyser._mask, rms_map_full)
     data_counts = analyser._map[mask]
     pos = np.array(hp.pix2vec(nside, np.arange(npix))).T
     data_positions = pos[mask]
@@ -231,6 +254,14 @@ def build_single(analyser):
         cecl = analyser._bias_cecl
         ecl_lat = compute_ecliptic_lat(nside, mask, analyser._map_coords)
 
+    rms_pix = None
+    rms_ref = None
+    if config.get('rms'):
+        rms_pix = rms_map_full[mask]
+        rms_ref = analyser._rms_ref
+        if rms_ref is None:
+            rms_ref = float(np.nanmedian(rms_map_full))
+
     if config['type'] == 'custom':
         custom_like = config['likelihood']
 
@@ -241,6 +272,7 @@ def build_single(analyser):
             config['type'], config['ell'], data_counts, data_positions,
             D_survey, param_names, ecl_lat, cecl,
             second_dipole=config.get('second_dipole'),
+            rms_pix=rms_pix, rms_ref=rms_ref,
         )
 
     ptform = make_ptform(param_names, priors)
@@ -277,12 +309,14 @@ def build_joint(analyser):
             combined_priors[p] = priors2[p]
 
     nside1 = hp.npix2nside(len(analyser._map))
-    mask1 = analyser._mask
+    rms_map1_full = analyser._rms_map if config1.get('rms') else None
+    mask1 = _resolve_mask_with_rms(analyser._mask, rms_map1_full)
     counts1 = analyser._map[mask1]
     pos1 = np.array(hp.pix2vec(nside1, np.arange(len(analyser._map)))).T[mask1]
 
     nside2 = hp.npix2nside(len(analyser._map2))
-    mask2 = analyser._mask2
+    rms_map2_full = analyser._rms_map_2 if config2.get('rms') else None
+    mask2 = _resolve_mask_with_rms(analyser._mask2, rms_map2_full)
     counts2 = analyser._map2[mask2]
     pos2 = np.array(hp.pix2vec(nside2, np.arange(len(analyser._map2)))).T[mask2]
 
@@ -305,6 +339,18 @@ def build_joint(analyser):
         cecl2 = analyser._bias_cecl_2
         ecl_lat2 = compute_ecliptic_lat(nside2, mask2, analyser._map2_coords)
 
+    rms_pix1 = None
+    rms_ref1 = None
+    if config1.get('rms'):
+        rms_pix1 = rms_map1_full[mask1]
+        rms_ref1 = analyser._rms_ref or float(np.nanmedian(rms_map1_full))
+
+    rms_pix2 = None
+    rms_ref2 = None
+    if config2.get('rms'):
+        rms_pix2 = rms_map2_full[mask2]
+        rms_ref2 = analyser._rms_ref_2 or float(np.nanmedian(rms_map2_full))
+
     if config1['type'] == 'custom':
         def loglike1_fn(x_dict):
             x = [x_dict[p] for p in params1]
@@ -312,7 +358,7 @@ def build_joint(analyser):
     else:
         loglike1_fn = make_loglike_dict(
             config1['type'], config1['ell'], counts1, pos1, D1, params1,
-            ecl_lat1, cecl1
+            ecl_lat1, cecl1, rms_pix=rms_pix1, rms_ref=rms_ref1,
         )
 
     if config2['type'] == 'custom':
@@ -323,7 +369,7 @@ def build_joint(analyser):
         loglike2_fn = make_loglike_dict_joint(
             config2['type'], config2['ell'], counts2, pos2, D2,
             params2_base, params2_mapped, need_coord_convert, from_sys, to_sys,
-            ecl_lat2, cecl2
+            ecl_lat2, cecl2, rms_pix=rms_pix2, rms_ref=rms_ref2,
         )
 
     def loglike(x):
@@ -406,7 +452,8 @@ def build_joint_n(analyser):
                     )
 
         nside = hp.npix2nside(len(d._map))
-        mask = d._mask
+        rms_map_full = d._rms_map if config.get('rms') else None
+        mask = _resolve_mask_with_rms(d._mask, rms_map_full)
         data_counts = d._map[mask]
         pos = np.array(hp.pix2vec(nside, np.arange(len(d._map)))).T
         data_positions = pos[mask]
@@ -418,11 +465,18 @@ def build_joint_n(analyser):
             cecl = d._bias_cecl
             ecl_lat = compute_ecliptic_lat(nside, mask, d._map_coords)
 
+        rms_pix = None
+        rms_ref = None
+        if config.get('rms'):
+            rms_pix = rms_map_full[mask]
+            rms_ref = d._rms_ref or float(np.nanmedian(rms_map_full))
+
         fn = make_loglike_dict_joint(
             config['type'], config['ell'], data_counts, data_positions,
             D_survey, params_base, params_mapped,
             need_convert=False, from_sys=analyser._map_coords,
             to_sys=analyser._map_coords, ecl_lat=ecl_lat, cecl=cecl,
+            rms_pix=rms_pix, rms_ref=rms_ref,
         )
         per_dataset_loglikes.append(fn)
 

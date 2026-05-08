@@ -151,6 +151,10 @@ def _check_supported(analyser):
             raise BlackjaxScopeError(
                 f"{label} uses a custom likelihood." + msg_suffix
             )
+        if cfg.get('rms'):
+            raise BlackjaxScopeError(
+                f"{label} uses rms=True." + msg_suffix
+            )
 
     _check_one(analyser._model_config, "model")
     if analyser._is_composite:
