@@ -157,6 +157,7 @@ The `examples/` directory contains worked scripts demonstrating the full pipelin
 | `07_joint_tension.py` | Joint analysis of two discrepant datasets (high tension) |
 | `08_joint_concordance.py` | Joint analysis of two concordant datasets (low tension) |
 | `09_two_dipoles.py` | Add a second dipole moment to the expected counts |
+| `10_rms_custom_noise.py` | RMS likelihood with a user-supplied noise map (array or file) |
 
 ## Tension statistics
 
