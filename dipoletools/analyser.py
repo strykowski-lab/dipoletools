@@ -2,6 +2,7 @@
 
 import copy
 import inspect
+import os
 import warnings
 
 import numpy as np
@@ -10,6 +11,24 @@ import matplotlib.pyplot as plt
 
 from ._utils import (ang2vec, d2r, convert_lonlat, lonlat_names)
 from ._defaults import DEFAULT_PRIORS
+
+
+def _load_rms_map(path):
+    """Load a HEALPix RMS map from a file path. Supports .npy, .fits, .hpx
+    (the latter two via healpy). The map is assumed to be RING-ordered.
+    """
+    ext = os.path.splitext(path)[1].lower()
+    if ext == '.npy':
+        arr = np.load(path)
+    elif ext in ('.fits', '.fit', '.hpx'):
+        arr = hp.read_map(path, verbose=False) if 'verbose' in \
+            hp.read_map.__code__.co_varnames else hp.read_map(path)
+    else:
+        raise ValueError(
+            f"Unsupported rms map file extension '{ext}'. "
+            "Use .npy, .fits, or .hpx."
+        )
+    return np.asarray(arr, dtype=float)
 
 
 def _resolve_second_dipole(second_dipole, map_coords):
@@ -289,7 +308,17 @@ class Analyser:
             Signature: loglike(params, data_counts, data_positions, D).
         param_names : list of str, optional
             Parameter names for custom likelihood. Required if likelihood is set.
+
+        Notes
+        -----
+        ``rms`` accepts True/False as before; it can also be a HEALPix RING-
+        ordered noise map (numpy array) or a path to one (.npy/.fits/.hpx).
+        In those cases, the map is used in place of the MapMaker's ``noise``
+        column. The nside must match the count map (otherwise an error is
+        raised). NaN pixels in the noise map are added to the count-map mask
+        with a warning.
         """
+        rms, rms_map = self._normalise_rms_arg(rms, rms_map)
         if ell is None:
             ell = [0, 1]
 
@@ -364,6 +393,7 @@ class Analyser:
         if self._map2 is None:
             raise ValueError("No map2 loaded. Set map2 first.")
 
+        rms, rms_map = self._normalise_rms_arg(rms, rms_map)
         if ell is None:
             ell = [0, 1]
 
@@ -455,6 +485,36 @@ class Analyser:
         summary += f"Parameters: {config['param_names']}"
         return summary
 
+    @staticmethod
+    def _normalise_rms_arg(rms, rms_map):
+        """Allow ``rms`` to be True/False, a HEALPix array, or a file path.
+
+        Returns ``(rms_bool, rms_map)``: the array/path forms are coerced to
+        ``rms_bool=True`` with ``rms_map`` set accordingly. If ``rms_map`` is
+        also supplied explicitly, the two must not disagree.
+        """
+        if isinstance(rms, bool):
+            return rms, rms_map
+        if isinstance(rms, str):
+            loaded = _load_rms_map(rms)
+            if rms_map is not None:
+                raise ValueError(
+                    "Pass the noise map via either rms= or rms_map=, not both."
+                )
+            return True, loaded
+        if isinstance(rms, np.ndarray) or (
+            hasattr(rms, '__array__') and not isinstance(rms, (bytes,))
+        ):
+            arr = np.asarray(rms, dtype=float)
+            if rms_map is not None:
+                raise ValueError(
+                    "Pass the noise map via either rms= or rms_map=, not both."
+                )
+            return True, arr
+        raise TypeError(
+            f"rms must be bool, ndarray, or str path; got {type(rms).__name__}."
+        )
+
     def _configure_rms(self, which, rms_map):
         """Resolve and store the RMS map and reference value for ``model``
         (which=1) or ``model2`` (which=2). Auto-derives ``rms_map`` from a
@@ -476,13 +536,42 @@ class Analyser:
                 )
             nside = hp.npix2nside(len(target_map))
             rms_map = mm.noise_map(nside=nside)
+        elif isinstance(rms_map, str):
+            rms_map = _load_rms_map(rms_map)
 
         rms_map = np.asarray(rms_map, dtype=float)
         if len(rms_map) != len(target_map):
+            map_nside = hp.npix2nside(len(target_map))
+            try:
+                rms_nside = hp.npix2nside(len(rms_map))
+            except ValueError:
+                rms_nside = '?'
             raise ValueError(
-                f"rms_map length {len(rms_map)} does not match map length "
+                f"rms_map nside ({rms_nside}) does not match map nside "
+                f"({map_nside}): rms_map length {len(rms_map)} vs map length "
                 f"{len(target_map)}."
             )
+
+        # NaN pixels in the noise map mean unusable count-map pixels: extend
+        # the mask and warn the user.
+        bad = ~np.isfinite(rms_map)
+        if which == 1:
+            mask_attr = '_mask'
+        else:
+            mask_attr = '_mask2'
+        current_mask = getattr(self, mask_attr)
+        if current_mask is not None and bad.any():
+            newly_masked = int(np.sum(bad & current_mask))
+            if newly_masked > 0:
+                warnings.warn(
+                    f"rms map contains {newly_masked} NaN pixel(s) within the "
+                    "existing mask; these are being added to the count-map "
+                    "mask. This is expected when the noise map has gaps.",
+                    UserWarning,
+                    stacklevel=3,
+                )
+                updated = current_mask & ~bad
+                setattr(self, mask_attr, updated)
 
         if which == 1:
             self._rms_map = rms_map
