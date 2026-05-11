@@ -95,6 +95,12 @@ SHORTHAND_CATALOGUES = {
                    'flux_err': 'e_total_flux_source', 'id': 'source_id'},
         'cuts': [{'col': 'total_flux_source', 'min': 15, 'max': 1000}],
     },
+    'racs-low2': {
+        'file': 'RACS-low2_sources_patched.fits',
+        'labels': {'ra': 'RA', 'dec': 'Dec', 'flux': 'Total_flux',
+                   'flux_err': 'E_Total_flux', 'id': 'Source_ID'},
+        'cuts': [{'col': 'Total_flux', 'min': 15, 'max': 1000}],
+    },
     'racs-low2-25': {
         'file': 'RACS-low2_sources_25arcsec_patched.fits',
         'labels': {'ra': 'RA', 'dec': 'Dec', 'flux': 'Total_flux',
@@ -118,6 +124,12 @@ SHORTHAND_CATALOGUES = {
         'labels': {'ra': 'RA', 'dec': 'Dec', 'flux': 'Total_flux',
                    'flux_err': 'E_Total_flux', 'id': 'Source_ID'},
         'cuts': [{'col': 'Total_flux', 'min': 15, 'max': 1000}],
+    },
+    'racs-mid1': {
+        'file': 'RACS-mid_sources.fits',
+        'labels': {'ra': 'ra', 'dec': 'dec', 'flux': 'total_flux',
+                   'flux_err': 'e_total_flux', 'id': 'id'},
+        'cuts': [{'col': 'total_flux', 'min': 15, 'max': 1000}],
     },
     'racs-mid1-25': {
         'file': 'RACS-mid_sources_25arcsec.fits',
