@@ -491,11 +491,15 @@ def _write_outputs_via_anesthetic(savedir, name, param_names, dead_info):
     chains_dir = os.path.join(target, 'chains')
     os.makedirs(chains_dir, exist_ok=True)
 
-    # dead_info is an NSInfo NamedTuple from handley-lab/blackjax with flat
-    # fields particles (positions), loglikelihood, loglikelihood_birth, logprior.
-    pos = np.asarray(dead_info.particles)
-    logL = np.asarray(dead_info.loglikelihood)
-    logL_birth = np.asarray(dead_info.loglikelihood_birth)
+    # dead_info is an NSInfo NamedTuple from handley-lab/blackjax. As of
+    # blackjax 1.2.6 (the version pinned by blackjax-metal), NSInfo wraps a
+    # StateWithLogLikelihood under ``.particles`` carrying .position +
+    # .loglikelihood + .loglikelihood_birth, rather than the flat fields the
+    # earlier fork exposed.
+    parts = dead_info.particles
+    pos = np.asarray(parts.position)
+    logL = np.asarray(parts.loglikelihood)
+    logL_birth = np.asarray(parts.loglikelihood_birth)
 
     # anesthetic NestedSamples needs columns + logL + logL_birth
     ns = NestedSamples(
@@ -646,14 +650,14 @@ def run_blackjax(analyser, savedir=None, name=None, seed=0,
         rng_key, step_key = jax.random.split(rng_key)
         state, info = step_jit(step_key, state)
         dead.append(info)
-        n_dead += int(info.loglikelihood.shape[0])
+        n_dead += int(info.particles.loglikelihood.shape[0])
         # Cheap termination heuristic: stop when the largest live log-L is
         # smaller than the log-sum-exp of the dead points minus dlogz —
         # i.e. the remaining evidence in live points is < dlogz.
-        live_logL = state.loglikelihood
+        live_logL = state.particles.loglikelihood
         max_live = jnp.max(live_logL)
         dead_logL = jnp.concatenate(
-            [d.loglikelihood for d in dead], axis=0
+            [d.particles.loglikelihood for d in dead], axis=0
         )
         logZ_dead = jax.scipy.special.logsumexp(dead_logL)
         max_live_f = float(max_live)
