@@ -43,7 +43,9 @@ def _configure_jax():
 
     devices = jax.devices()
     backend = devices[0].platform if devices else 'cpu'
-    is_metal = backend.lower() == 'metal'
+    # 'metal' = jax-metal plugin; 'mps' = applejax/jax-mps plugin. Both are
+    # Apple GPU backends limited to float32.
+    is_metal = backend.lower() in ('metal', 'mps')
 
     if is_metal:
         _FLOAT32_FALLBACK = True
@@ -296,6 +298,10 @@ def _make_jax_loglike_single(analyser):
     # Indices of named params in the param vector x
     idx = {p: param_names.index(p) for p in param_names}
 
+    lows, highs, is_polar = _prior_box(param_names, priors)
+    lows_j = jnp.asarray(lows)
+    highs_j = jnp.asarray(highs)
+
     def loglike(x):
         N = x[idx['N']]
         v = x[idx['v']] if 'v' in idx else 0.0
@@ -307,9 +313,14 @@ def _make_jax_loglike_single(analyser):
             bias=bias, ecl_lat=ecl_lat_j, cecl=cecl,
         )
         gp = x[idx['gp_dispersion']] if mtype == 'general_poisson' else None
-        return _jax_loglike_value(mtype, counts_j, expected, gp_dispersion=gp)
+        val = _jax_loglike_value(mtype, counts_j, expected, gp_dispersion=gp)
+        # BlackJAX-NS's slice sampler tests in_contour purely on loglikelihood
+        # (logprior is only used for evidence). The model itself produces
+        # finite log-probs for any real-valued params, so out-of-box proposals
+        # would be accepted unless we enforce the box here.
+        in_box = jnp.all((x >= lows_j) & (x <= highs_j))
+        return jnp.where(in_box, val, -jnp.inf)
 
-    lows, highs, is_polar = _prior_box(param_names, priors)
     return jax.jit(loglike), param_names, lows, highs, is_polar
 
 
@@ -418,6 +429,25 @@ def _make_jax_loglike_joint(analyser):
         per_dataset_specs.append((mtype, idx_map, counts_j, pos_j,
                                    ecl_lat_j, cecl, D_survey, has_bias))
 
+    # Build combined priors first so the prior box is available inside loglike.
+    combined_priors = {}
+    for p in _FORCED_SHARED:
+        combined_priors[p] = analyser._priors_config.get(
+            p, DEFAULT_PRIORS.get(p, {'type': 'uniform', 'low': 0.0, 'high': 1.0})
+        )
+    for d, dname in zip(datasets, names):
+        for p_base in d._model_config['param_names']:
+            if p_base in forced_shared:
+                continue
+            p_mapped = f'{p_base}_{dname}'
+            combined_priors[p_mapped] = d._priors_config.get(
+                p_base,
+                DEFAULT_PRIORS.get(p_base, {'type': 'uniform', 'low': 0.0, 'high': 1.0}),
+            )
+    lows, highs, is_polar = _prior_box(combined_params, combined_priors)
+    lows_j = jnp.asarray(lows)
+    highs_j = jnp.asarray(highs)
+
     def loglike(x):
         total = 0.0
         for (mtype, idx, counts_j, pos_j, ecl_lat_j, cecl, D_survey,
@@ -434,25 +464,11 @@ def _make_jax_loglike_joint(analyser):
             gp = x[idx['gp_dispersion']] if mtype == 'general_poisson' else None
             total = total + _jax_loglike_value(mtype, counts_j, expected,
                                                 gp_dispersion=gp)
-        return total
+        # Enforce prior box: slice sampler's contour test is loglikelihood-only
+        # (see _make_jax_loglike_single).
+        in_box = jnp.all((x >= lows_j) & (x <= highs_j))
+        return jnp.where(in_box, total, -jnp.inf)
 
-    # Build combined priors: shared from analyser, unshared from each dataset
-    combined_priors = {}
-    for p in _FORCED_SHARED:
-        combined_priors[p] = analyser._priors_config.get(
-            p, DEFAULT_PRIORS.get(p, {'type': 'uniform', 'low': 0.0, 'high': 1.0})
-        )
-    for d, dname in zip(datasets, names):
-        for p_base in d._model_config['param_names']:
-            if p_base in forced_shared:
-                continue
-            p_mapped = f'{p_base}_{dname}'
-            combined_priors[p_mapped] = d._priors_config.get(
-                p_base,
-                DEFAULT_PRIORS.get(p_base, {'type': 'uniform', 'low': 0.0, 'high': 1.0}),
-            )
-
-    lows, highs, is_polar = _prior_box(combined_params, combined_priors)
     return jax.jit(loglike), combined_params, lows, highs, is_polar
 
 
@@ -475,11 +491,11 @@ def _write_outputs_via_anesthetic(savedir, name, param_names, dead_info):
     chains_dir = os.path.join(target, 'chains')
     os.makedirs(chains_dir, exist_ok=True)
 
-    # dead_info.particles is a StateWithLogLikelihood with fields:
-    # position, logdensity (log-prior), loglikelihood, loglikelihood_birth.
-    pos = np.asarray(dead_info.particles.position)
-    logL = np.asarray(dead_info.particles.loglikelihood)
-    logL_birth = np.asarray(dead_info.particles.loglikelihood_birth)
+    # dead_info is an NSInfo NamedTuple from handley-lab/blackjax with flat
+    # fields particles (positions), loglikelihood, loglikelihood_birth, logprior.
+    pos = np.asarray(dead_info.particles)
+    logL = np.asarray(dead_info.loglikelihood)
+    logL_birth = np.asarray(dead_info.loglikelihood_birth)
 
     # anesthetic NestedSamples needs columns + logL + logL_birth
     ns = NestedSamples(
@@ -490,7 +506,7 @@ def _write_outputs_via_anesthetic(savedir, name, param_names, dead_info):
     # Equal-weighted samples by importance resampling. posterior_points()
     # returns ~ESS points (often <100), which makes downstream KDE plots
     # look clumpy; compress with an explicit large count instead.
-    eq = ns.compress(ncompress=8000, weighted=False)
+    eq = ns.compress(ncompress=8000)
     samples_arr = eq[list(param_names)].to_numpy()
 
     # Header line + samples
@@ -573,11 +589,21 @@ def run_blackjax(analyser, savedir=None, name=None, seed=0,
 
     # Override shared parameters to the forced layout for joint analyses
     is_legacy_joint = analyser._map2 is not None
+    external_terms = list(getattr(analyser, '_external_jax_terms', []))
     if analyser._is_composite or is_legacy_joint:
         analyser._shared_parameters = list(_FORCED_SHARED)
         loglike_fn, param_names, lows, highs, is_polar = _make_jax_loglike_joint(analyser)
     else:
         loglike_fn, param_names, lows, highs, is_polar = _make_jax_loglike_single(analyser)
+
+    if external_terms:
+        import jax
+        from . import _blackjax_external as _ext
+        loglike_fn, param_names, lows, highs, is_polar = \
+            _ext.extend_joint_with_externals(
+                loglike_fn, param_names, lows, highs, is_polar, external_terms,
+            )
+        loglike_fn = jax.jit(loglike_fn)
 
     n_dim = len(param_names)
     if num_mcmc_steps is None:
@@ -620,14 +646,14 @@ def run_blackjax(analyser, savedir=None, name=None, seed=0,
         rng_key, step_key = jax.random.split(rng_key)
         state, info = step_jit(step_key, state)
         dead.append(info)
-        n_dead += int(info.particles.loglikelihood.shape[0])
+        n_dead += int(info.loglikelihood.shape[0])
         # Cheap termination heuristic: stop when the largest live log-L is
         # smaller than the log-sum-exp of the dead points minus dlogz —
         # i.e. the remaining evidence in live points is < dlogz.
-        live_logL = state.particles.loglikelihood
+        live_logL = state.loglikelihood
         max_live = jnp.max(live_logL)
         dead_logL = jnp.concatenate(
-            [d.particles.loglikelihood for d in dead], axis=0
+            [d.loglikelihood for d in dead], axis=0
         )
         logZ_dead = jax.scipy.special.logsumexp(dead_logL)
         max_live_f = float(max_live)

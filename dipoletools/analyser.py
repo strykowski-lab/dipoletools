@@ -208,6 +208,10 @@ class Analyser:
         self._children: dict = {}          # ordered dict of child Analysers
         self._is_composite: bool = False
 
+        # Opaque-JAX joint partners (see _blackjax_external). Empty by default;
+        # populated by add_external_jax_child(...). Routed only by .blackjax().
+        self._external_jax_terms: list = []
+
     # ------------------------------------------------------------------
     # Properties for map, mask, D, map2, mask2, d2
     # ------------------------------------------------------------------
@@ -1142,6 +1146,22 @@ class Analyser:
             frac_remain=frac_remain, step=step, step_nsteps=step_nsteps,
             seed=seed, **sampler_kwargs,
         )
+
+    def add_external_jax_child(self, name, lnlike_fn, param_specs):
+        """Attach an opaque JAX-lnlike joint partner (BlackJAX only).
+
+        Special case: not the generic "supply your own likelihood" hook. The
+        partner is described by a JAX log-likelihood taking a parameter dict
+        and its own parameter spec list. See
+        ``dipoletools._blackjax_external`` for the contract and an example.
+
+        After attaching, calling ``.blackjax(...)`` will run a joint NS with
+        the standard ``(v, theta, phi)`` shared layout and all other
+        parameters from each side unshared (and suffixed).
+        """
+        from . import _blackjax_external as _ext
+        _ext.attach_to_analyser(self, name, lnlike_fn, param_specs)
+        return self
 
     def blackjax(self, savedir=None, name=None, seed=0,
                  n_live=500, n_delete=300, num_mcmc_steps=None,
