@@ -507,6 +507,15 @@ def _write_outputs_via_anesthetic(savedir, name, param_names, dead_info):
         logL=logL, logL_birth=logL_birth,
     )
 
+    # Raw dead chain: positions + logL + logL_birth + column order. Lets us
+    # re-derive equal-weighted samples at any ncompress, do weighted KDEs,
+    # or recompute stats without rerunning NS.
+    np.savez(
+        os.path.join(chains_dir, 'ns_dead_points.npz'),
+        positions=pos, logL=logL, logL_birth=logL_birth,
+        columns=np.array(list(param_names)),
+    )
+
     # Equal-weighted samples by importance resampling. posterior_points()
     # returns ~ESS points (often <100), which makes downstream KDE plots
     # look clumpy; compress with an explicit large count instead.
@@ -551,6 +560,28 @@ def _write_outputs_via_anesthetic(savedir, name, param_names, dead_info):
     )
 
     return target
+
+
+def load_ns_chain(run_dir):
+    """Reconstitute an anesthetic ``NestedSamples`` from the raw dead chain
+    written by :func:`_write_outputs_via_anesthetic`.
+
+    Parameters
+    ----------
+    run_dir : str | pathlib.Path
+        The per-run directory (the one containing ``chains/``).
+
+    Returns
+    -------
+    anesthetic.NestedSamples
+    """
+    from anesthetic import NestedSamples
+    p = os.path.join(str(run_dir), 'chains', 'ns_dead_points.npz')
+    d = np.load(p, allow_pickle=False)
+    return NestedSamples(
+        data=d['positions'], columns=list(d['columns']),
+        logL=d['logL'], logL_birth=d['logL_birth'],
+    )
 
 
 # ----------------------------------------------------------------------
