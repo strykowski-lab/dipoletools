@@ -491,11 +491,12 @@ def _write_outputs_via_anesthetic(savedir, name, param_names, dead_info):
     chains_dir = os.path.join(target, 'chains')
     os.makedirs(chains_dir, exist_ok=True)
 
-    # dead_info is an NSInfo NamedTuple from handley-lab/blackjax with flat
-    # fields particles (positions), loglikelihood, loglikelihood_birth, logprior.
-    pos = np.asarray(dead_info.particles)
-    logL = np.asarray(dead_info.loglikelihood)
-    logL_birth = np.asarray(dead_info.loglikelihood_birth)
+    # dead_info is an NSInfo(particles, update_info) where particles is a
+    # StateWithLogLikelihood(position, logdensity, loglikelihood, loglikelihood_birth).
+    particles_state = dead_info.particles
+    pos = np.asarray(particles_state.position)
+    logL = np.asarray(particles_state.loglikelihood)
+    logL_birth = np.asarray(particles_state.loglikelihood_birth)
 
     # anesthetic NestedSamples needs columns + logL + logL_birth
     ns = NestedSamples(
