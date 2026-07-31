@@ -243,7 +243,8 @@ class Posterior:
     # corner plot
     # ------------------------------------------------------------------
     def corner(self, parameters=None, labels=None, color='#1f77b4',
-               velocity_scale=369.82, decimals=None, show=True, **kwargs):
+               velocity_scale=369.82, decimals=None, sigmas=(1, 2),
+               show=True, **kwargs):
         """Plot a GetDist corner plot of the posterior chains.
 
         Shows filled 1- and 2-sigma contours (no sample points), and
@@ -263,6 +264,10 @@ class Posterior:
             Factor to convert 'v' to km/s for plotting. Default 369.82.
         decimals : int or list of int, optional
             Decimal places for title formatting. Auto if None.
+        sigmas : array-like
+            Sigma levels for the 2D contours. Default (1, 2). These are
+            true n-sigma levels, i.e. the enclosed 2D probability mass is
+            1 - exp(-n^2/2), matching the convention used by ``sky()``.
         show : bool
             Call plt.show() at the end. Default True.
         **kwargs
@@ -298,17 +303,23 @@ class Posterior:
         display_names = [self._angular_display_name(p) for p in plot_names]
         plot_labels = [get_label(p, self._coord_system, labels) for p in plot_names]
 
+        # GetDist's default `contours` are credible masses (0.68, 0.95),
+        # which for a 2D density are the 1.51-sigma and 2.45-sigma levels.
+        # The enclosed 2D mass of a true n-sigma contour is 1 - exp(-n^2/2).
+        sigma_levels = np.sort(np.atleast_1d(np.asarray(sigmas, dtype=float)))
+        contours = list(1 - np.exp(-0.5 * sigma_levels**2))
+
         mc = MCSamples(
             samples=plot_samples,
             names=display_names,
             labels=plot_labels,
             settings={'fine_bins_2D': 256, 'smooth_scale_2D': 0.3,
-                      'smooth_scale_1D': 0.3},
+                      'smooth_scale_1D': 0.3, 'contours': contours},
         )
 
-        # 1- and 2-sigma contours only; no scatter points.
+        # n-sigma contours only; no scatter points.
         g = gdplots.get_subplot_plotter()
-        g.settings.num_plot_contours = 2
+        g.settings.num_plot_contours = len(contours)
         g.triangle_plot(
             mc,
             params=display_names,
