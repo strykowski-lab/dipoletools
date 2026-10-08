@@ -131,6 +131,12 @@ SHORTHAND_CATALOGUES = {
                    'flux_err': 'e_total_flux', 'id': 'id'},
         'cuts': [{'col': 'total_flux', 'min': 15, 'max': 1000}],
     },
+    'racs-mid-unscaled': {
+        'file': 'RACS-mid_unscaled.fits',
+        'labels': {'ra': 'RA', 'dec': 'DEC', 'flux': 'Total_flux',
+                   'flux_err': 'E_Total_flux', 'id': 'Source_ID'},
+        'cuts': [{'col': 'Total_flux', 'min': 15, 'max': 1000}],
+    },
     'racs-mid1-25': {
         'file': 'RACS-mid_sources_25arcsec.fits',
         'labels': {'ra': 'ra', 'dec': 'dec', 'flux': 'total_flux',
